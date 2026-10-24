@@ -64,7 +64,7 @@ class Arena:
         self.rng = random.Random(seed)
         m = {"dodge": 0.0, "shrink": 0.0, "atk": 0.0, "foe_slow": 0.0, "proj_slow": 0.0}
         m.update(mods or {})
-        self.mods = m
+        self.mods = m #67
         self.t = 0.0
         self.time = float(spec.get("time", 9.0))
         self.done = False
