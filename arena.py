@@ -64,7 +64,7 @@ class Arena:
         self.rng = random.Random(seed)
         m = {"dodge": 0.0, "shrink": 0.0, "atk": 0.0, "foe_slow": 0.0, "proj_slow": 0.0}
         m.update(mods or {})
-        self.mods = m #67
+        self.mods = m
         self.t = 0.0
         self.time = float(spec.get("time", 9.0))
         self.done = False
@@ -358,8 +358,8 @@ class Arena:
     def snapshot(self):
         r1 = lambda v: round(v, 1)
         s = {"m": self.mode, "t": round(self.t, 2), "T": self.time, "dmg": self.dmg, "hits": self.hits,
-             "done": 1 if self.done else 0, "d": [r1(self.dx), r1(self.dy)], "dr": r1(self.dr),
-             "aim": [r1(self.mx), r1(self.my)], "ev": self.events[:]}
+             "done": 1 if self.done else 0, "d": [r1(self.dx), r1(self.dy)], "dr": r1(self.dr), "sp": round(self.dspeed),
+             "aim": [r1(self.mx), r1(self.my)], "sp": r1(self.dspeed), "ev": self.events[:]}
         self.events = []
         m = self.mode
         if m == "shoot":

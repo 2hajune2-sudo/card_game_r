@@ -3,8 +3,8 @@
 
 실행:
     python cardgame.py                  메뉴
-    python cardgame.py host [포트]      방 만들기 (기본 포트 5050)
-    python cardgame.py join IP [포트]   방 참가
+    python cardgame.py host             방 만들기 (방 코드가 나와요)
+    python cardgame.py join 코드        방 참가 (방장이 알려 준 코드)
     python cardgame.py --no-color       색 끄기
 
 카드와 규칙 숫자는 cards.json 에서 바꿉니다. 새 효과를 만들려면
@@ -364,6 +364,11 @@ class Player:
         return sum(CARDS[f["id"]].get("mods", {}).get(key, 0) for f in self.field)
 
 
+def pull(hand, n):
+    """손패에서 무작위로 최대 n장을 뽑아 내고, 뽑힌 카드 목록을 돌려줘요"""
+    return [hand.pop(random.randrange(len(hand))) for _ in range(min(n, len(hand)))]
+
+
 class Game:
     def __init__(self, deck0, deck1):
         self.p = [Player(deck0), Player(deck1)]
@@ -465,6 +470,11 @@ class Game:
         if real > 0 and not no_hit and not self.over:
             self.fire(tgt, "hit", no_hit=True)
 
+    def heal(self, o, n):
+        P = self.p[o]
+        P.hp = min(CFG["max_hp"], P.hp + n)
+        self.say(o, f"체력 +{n} · 체력 {P.hp}")
+
     def run_fx(self, o, fx, bonus=False, no_hit=False, cid=None):
         P, Q = self.p[o], self.p[1 - o]
         copies = P.hand.count(cid) if cid else 0   # 손패에 남은 '다른' 같은 카드 수 (사용한 카드 제외)
@@ -492,13 +502,9 @@ class Game:
             elif op == "dmgPerInstall":
                 self.deal_damage(1 - o, v * len(P.field) + extra, no_hit)
             elif op == "healRand":
-                n = random.randint(v, e["b"])
-                P.hp = min(CFG["max_hp"], P.hp + n)
-                self.say(o, f"체력 +{n} · 체력 {P.hp}")
+                self.heal(o, random.randint(v, e["b"]))
             elif op == "healPerInstall":
-                n = v * len(P.field)
-                P.hp = min(CFG["max_hp"], P.hp + n)
-                self.say(o, f"체력 +{n} · 체력 {P.hp}")
+                self.heal(o, v * len(P.field))
             elif op == "chance":
                 win = random.random() * 100 < e["p"]
                 self.say(o, "행운! 🍀" if win else "불운… 💧")
@@ -513,9 +519,7 @@ class Game:
                 Q.field.clear()
                 self.say(1 - o, f"설치 카드 {n}장이 모두 파괴됐어요")
             elif op == "healMissing":
-                n = max(v, (CFG["max_hp"] - P.hp + 1) // 2)
-                P.hp = min(CFG["max_hp"], P.hp + n)
-                self.say(o, f"체력 +{n} · 체력 {P.hp}")
+                self.heal(o, max(v, (CFG["max_hp"] - P.hp + 1) // 2))
             elif op == "mirror":
                 m = self.last_instant[1 - o]
                 if m and not any(x["op"] == "mirror" for x in CARDS[m]["fx"]):
@@ -528,38 +532,20 @@ class Game:
                 self.say(o, f"스스로 {v} 피해 · 체력 {max(P.hp, 0)}")
                 self.check_over()
             elif op == "heal":
-                P.hp = min(CFG["max_hp"], P.hp + v)
-                self.say(o, f"체력 +{v} · 체력 {P.hp}")
+                self.heal(o, v)
             elif op == "healPerCopy":
-                n = e.get("b", 0) + v * copies
-                P.hp = min(CFG["max_hp"], P.hp + n)
-                self.say(o, f"체력 +{n} · 체력 {P.hp}")
+                self.heal(o, e.get("b", 0) + v * copies)
             elif op == "draw":
                 self.draw(o, v)
                 self.say(o, f"카드 {v}장 뽑기")
             elif op == "discard":
-                n = 0
-                for _ in range(v):
-                    if Q.hand:
-                        Q.hand.pop(random.randrange(len(Q.hand)))
-                        n += 1
-                self.say(1 - o, f"손패 {n}장 버려짐")
+                self.say(1 - o, f"손패 {len(pull(Q.hand, v))}장 버려짐")
             elif op == "discardSelf":
-                n = 0
-                for _ in range(v):
-                    if P.hand:
-                        P.hand.pop(random.randrange(len(P.hand)))
-                        n += 1
-                self.say(o, f"손패 {n}장 버림")
+                self.say(o, f"손패 {len(pull(P.hand, v))}장 버림")
             elif op == "steal":
-                n = 0
-                for _ in range(v):
-                    if Q.hand:
-                        c = Q.hand.pop(random.randrange(len(Q.hand)))
-                        if len(P.hand) < CFG["hand_limit"]:
-                            P.hand.append(c)
-                        n += 1
-                self.say(o, f"상대 손패 {n}장 훔침")
+                got = pull(Q.hand, v)
+                P.hand += got[:max(0, CFG["hand_limit"] - len(P.hand))]
+                self.say(o, f"상대 손패 {len(got)}장 훔침")
             elif op == "breakInstall":
                 for _ in range(v):
                     if Q.field:
@@ -1077,6 +1063,10 @@ def play_ai(deck):
 class Conn:
     def __init__(self, sock):
         self.sock = sock
+        try:
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)   # 작은 메시지를 모아 보내지 않게 (지연 감소)
+        except OSError:
+            pass
         self.f = sock.makefile("rw", encoding="utf-8", newline="\n")
 
     def send(self, obj):
@@ -1096,22 +1086,73 @@ class Conn:
 
 def local_ip():
     try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("8.8.8.8", 80))
-        ip = s.getsockname()[0]
-        s.close()
-        return ip
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("8.8.8.8", 80))
+            return s.getsockname()[0]
     except OSError:
         return "127.0.0.1"
 
 
-def host_game(deck, port):
+def public_ip(timeout=2.0):
+    """인터넷용 방 코드에 쓸 공인 IP (실패하면 None)"""
+    try:
+        from urllib.request import urlopen
+        with urlopen("https://api.ipify.org", timeout=timeout) as r:
+            ip = r.read().decode().strip()
+        socket.inet_aton(ip)
+        return ip
+    except Exception:
+        return None
+
+
+# 방 코드 = 방장 주소(IP 4바이트 + 포트 2바이트 + 검사 1바이트)를 32진수 12글자로 줄인 것.
+# 헷갈리는 글자(I L O U)를 뺀 알파벳이라 말로 불러 줘도 안전해요.
+_ALPHA = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+
+
+def make_code(ip, port):
+    b = bytes(int(x) for x in ip.split(".")) + port.to_bytes(2, "big")
+    n = int.from_bytes(b + bytes([sum(b) % 256]), "big")
+    s = "".join(_ALPHA[n >> (5 * i) & 31] for i in range(11, -1, -1))
+    return "-".join(s[i:i + 4] for i in (0, 4, 8))
+
+
+def parse_code(code):
+    """방 코드 → (ip, 포트). 잘못된 코드면 ValueError"""
+    s = "".join(ch for ch in str(code).upper() if ch.isalnum()).translate(str.maketrans("OILU", "011V"))
+    if len(s) != 12 or any(ch not in _ALPHA for ch in s):
+        raise ValueError("방 코드가 올바르지 않아요. 12글자(예: ABCD-EFGH-JKMN)를 확인해 주세요.")
+    n = 0
+    for ch in s:
+        n = n * 32 + _ALPHA.index(ch)
+    if n >> 56:
+        raise ValueError("방 코드가 올바르지 않아요.")
+    b = n.to_bytes(7, "big")
+    if sum(b[:6]) % 256 != b[6]:
+        raise ValueError("방 코드에 오타가 있어요. 다시 확인해 주세요.")
+    return ".".join(map(str, b[:4])), int.from_bytes(b[4:6], "big")
+
+
+def open_server(port=DEFAULT_PORT):
+    """기본 포트가 쓰이는 중이면 빈 포트를 자동으로 골라요. → (서버 소켓, 실제 포트)"""
     srv = socket.socket()
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    srv.bind(("", port))
+    try:
+        srv.bind(("", port))
+    except OSError:
+        srv.bind(("", 0))
     srv.listen(1)
-    print(f"방을 열었어요. 상대에게 알려 주세요 → python cardgame.py join {local_ip()} {port}")
-    print("(같은 와이파이/LAN이면 위 주소, 인터넷이면 포트 포워딩이 필요해요) 기다리는 중…")
+    return srv, srv.getsockname()[1]
+
+
+def host_game(deck, port=DEFAULT_PORT):
+    srv, port = open_server(port)
+    print("방을 열었어요! 친구에게 아래 방 코드를 알려 주세요.")
+    print(f"  같은 와이파이/LAN → {make_code(local_ip(), port)}")
+    pub = public_ip()
+    if pub:
+        print(f"  인터넷            → {make_code(pub, port)}   (공유기에서 포트 {port} 포워딩 필요)")
+    print("기다리는 중…")
     sock, addr = srv.accept()
     srv.close()
     c = Conn(sock)
@@ -1160,11 +1201,15 @@ def validate_hello(m):
     return validate_deck(m.get("deck"))
 
 
-def join_game(deck, ip, port):
+def join_game(deck, code):
     try:
+        ip, port = parse_code(code)
         c = Conn(socket.create_connection((ip, port), timeout=10))
+    except ValueError as e:
+        print(e)
+        return
     except OSError as e:
-        print("접속하지 못했어요:", e)
+        print("접속하지 못했어요 (방이 열려 있는지, 코드가 맞는지 확인해 주세요):", e)
         return
     c.sock.settimeout(None)
     c.send({"t": "hello", "deck": deck})
@@ -1288,12 +1333,9 @@ def menu():
         if s == "1" and need_valid(deck):
             play_ai(deck)
         elif s == "2" and need_valid(deck):
-            p = input(f"포트 (엔터={DEFAULT_PORT}) > ").strip()
-            host_game(deck, int(p) if p.isdigit() else DEFAULT_PORT)
+            host_game(deck)
         elif s == "3" and need_valid(deck):
-            ip = input("방장 IP > ").strip()
-            p = input(f"포트 (엔터={DEFAULT_PORT}) > ").strip()
-            join_game(deck, ip, int(p) if p.isdigit() else DEFAULT_PORT)
+            join_game(deck, input("방 코드 > ").strip())
         elif s == "4":
             deck = deck_menu(deck)
         elif s == "5":
@@ -1317,11 +1359,11 @@ def main(argv):
         elif args[0] == "host":
             deck = load_deck() if not AUTO else auto_deck()
             if need_valid(deck):
-                host_game(deck, int(args[1]) if len(args) > 1 else DEFAULT_PORT)
+                host_game(deck)
         elif args[0] == "join" and len(args) > 1:
             deck = load_deck() if not AUTO else auto_deck()
             if need_valid(deck):
-                join_game(deck, args[1], int(args[2]) if len(args) > 2 else DEFAULT_PORT)
+                join_game(deck, args[1])
         elif args[0] == "ai":
             deck = load_deck() if not AUTO else auto_deck()
             if need_valid(deck):
