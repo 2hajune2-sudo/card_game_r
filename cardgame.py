@@ -123,7 +123,7 @@ def load_data():
         check(c["id"], c.get("fx_hit", []))
         if "arena" in c:
             ar = c["arena"]
-            if ar.get("mode") not in ("shoot", "swarm", "zone", "chase", "bounce", "pick"):
+            if ar.get("mode") not in __import__("arena").MODES:
                 sys.exit(f"cards.json 오류: {c['id']} 의 arena.mode 가 올바르지 않아요")
             check(c["id"], ar.get("danger", []))
             check(c["id"], ar.get("safe", []))
@@ -206,7 +206,7 @@ def card_notes(c):
         if c.get("arena"):
             try:
                 import arena as _ar
-                title, att, dfn = _ar.HELP[c["arena"]["mode"]]
+                title, att, dfn = _ar.help_for(c["arena"])
                 n.append(f"공격 방식 [{title}] — 공격할 때 검은 아레나가 열려요.")
                 n.append("공격하는 쪽: " + att)
                 n.append("피하는 쪽: " + dfn)
@@ -733,8 +733,16 @@ class Game:
             if dmg > 0:
                 dmg += P.mod("dealBonus")
                 self.deal_damage(1 - pi, dmg)
-            else:
+            elif not (result.get("self") or result.get("sheal") or result.get("fheal")):
                 self.say(1 - pi, "공격을 모두 피했어요!")
+            if result.get("fheal") and not self.over:           # 상대가 초록 구슬을 먹어 회복
+                self.say(1 - pi, "구슬을 먹었어요!")
+                self.heal(1 - pi, int(result["fheal"]))
+            if result.get("self") and not self.over:            # 반격/반동으로 내가 입는 피해
+                self.say(pi, "반격을 맞았어요!")
+                self.deal_damage(pi, int(result["self"]))
+            if result.get("sheal") and not self.over:           # 의식 성공: 내 회복
+                self.heal(pi, int(result["sheal"]))
             if hits > 0 and not self.over:
                 self.run_fx(pi, eff.get("fx_hit", []))
         if not self.over:
@@ -1306,11 +1314,13 @@ def rules_text():
         "■ 설치 중에는 'N턴 뒤 발동'(시한 만료)이나 '설치가 N장 이상일 때만 발동'하는 카드가 있어요\n"
         "■ 공격 카드를 쓰면 검은 아레나가 열려요: 공격하는 쪽은 카드마다 다른 방식으로 조종하고(마우스),\n"
         "  맞는 쪽은 WASD/방향키로 피해요. 맞은 만큼만 피해가 들어가요 (창 버전. 터미널은 자동 판정)\n"
+        "■ 공격 방식은 카드마다 달라요: 화살비·불비, 방패, 부채꼴, 레이저, 칼날 구체, 칼싸움(반격 피해!), 블랙홀, 차원문,\n"
+        "  심판 격자, 치유 의식, 초록 구슬(상대 회복), 조작 반전·얼음판·시야 제한 등\n"
         "■ 상자 고르기 같은 확률 카드는 맞는 쪽이 직접 골라요: 안전하면 회복, 위험하면 피해\n"
         "■ 방어 설치(방벽)는 받는 피해를 N까지 막고, 다 막거나 지속 턴이 지나면 사라져요 (방벽 → 보호막 → 체력 순서)\n"
         "■ 필드 전용 카드는 아레나에서만 효과가 있어요 (피할 때 속도 증가 등)\n"
-        "■ 등급: 일반(수치 1, 단독 효과 · 개미 떼만 같은 카드를 모으면 강해짐) / 레어(2~3, 쓸만한 특수) /\n"
-        "        영웅(3, 강하지만 리스크) / 레전드(각각 다른 독특한 효과, 판을 뒤집어요)")
+        "■ 등급: 일반(피해 1~2, 단독 효과) / 레어(2~4, 쓸만한 특수) /\n"
+        "        영웅(3~5, 강하지만 리스크) / 레전드(각각 다른 독특한 효과, 판을 뒤집어요)")
 
 
 def show_rules():

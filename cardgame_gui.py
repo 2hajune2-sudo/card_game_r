@@ -5,8 +5,14 @@ cardgame.py, cards.json 과 같은 폴더에 두고 실행하세요.
     python cardgame_gui.py
 
 - 카드를 한 번 클릭하면 선택, 더블클릭하면 바로 사용
-- 게임 규칙·AI·통신은 cardgame.py 를 그대로 사용합니다.
-  (터미널 버전과도 서로 온라인 대전이 됩니다)
+- 게임 규칙·AI는 cardgame.py 를 그대로 사용합니다.
+
+온라인 대전 (창 버전끼리만):
+  1) 한 명이 relay_server.py 를 켜 둬요:   python relay_server.py      (포트 5051)
+  2) 모두 게임의 '온라인' 화면에서 '서버 주소'에 그 컴퓨터의 주소:포트 를 적어요 (한 번만, 저장돼요)
+  3) 방장이 '방 만들기' → 5자리 방 번호가 나와요 → 친구가 그 번호로 '참가'
+  4) 대기실에서 덱을 바꾸고, 둘 다 '준비완료'를 누르면 시작해요. 끝나면 대기실로 돌아와 다시 할 수 있어요
+  (터미널 버전의 온라인은 예전 방식이라 창 버전과는 서로 연결되지 않아요)
 """
 import json
 import math
@@ -28,8 +34,7 @@ from tkinter import ttk, messagebox
 import arena as AR
 from cardgame import (CARDS, CFG, RN, KN, RORDER, Game, ai_choose,
                       auto_deck, describe, load_deck, save_deck, validate_deck,
-                      validate_hello, rarity_counts, local_ip, LIMIT, card_notes,
-                      make_code, parse_code, open_server, public_ip)
+                      rarity_counts, LIMIT, card_notes)
 
 # ─── 색상 팔레트 ────────────────────────────────────────
 BG_TOP, BG_BOTTOM = "#FFD58A", "#FFF6E5"
@@ -48,7 +53,9 @@ ARENA_BG = "#0B0B10"
 AI_SKILL = 0.55              # AI가 조종할 때의 실력 (0~1)
 ARENA_INTRO = 2.6            # 아레나 시작 전 안내 시간(초)
 HANGUL_KEYS = {"ㅈ": "w", "ㅁ": "a", "ㄴ": "s", "ㅇ": "d"}   # 한글 입력 상태에서도 WASD가 먹히게
-MODE_ICON = {"shoot": "🎯", "swarm": "🐜", "zone": "🔥", "chase": "🗡", "bounce": "🎲", "pick": "🎁"}
+MODE_ICON = {"shoot": "🎯", "swarm": "🐜", "zone": "🔥", "chase": "🗡", "bounce": "🎲", "pick": "🎁", "rain": "🏹",
+             "orbit": "🌪", "duel": "⚔", "shield": "🛡", "cone": "🔥", "gamble": "💚", "channel": "✚", "knock": "💨",
+             "vortex": "🌀", "warp": "🚪", "beam": "⚡", "grid": "⚖"}
 W, H = 1300, 672
 
 
@@ -219,14 +226,50 @@ def field_chip(parent, cid, left, on_click=None, hp=None):
 
 
 # ─── 네트워크 (줄 단위 JSON, cardgame.py 터미널 버전과 같은 규약) ─────
+ONLINE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "online.json")
+DEFAULT_SERVER = os.environ.get("HANJANG_SERVER", "127.0.0.1:5051")
+
+
+def load_server():
+    """저장된 중계 서버 주소 (없으면 기본값)"""
+    try:
+        with open(ONLINE_FILE, encoding="utf-8") as f:
+            return json.load(f).get("server") or DEFAULT_SERVER
+    except (OSError, ValueError, AttributeError):
+        return DEFAULT_SERVER
+
+
+def save_server(addr):
+    try:
+        with open(ONLINE_FILE, "w", encoding="utf-8") as f:
+            json.dump({"server": addr}, f, ensure_ascii=False)
+    except OSError:
+        pass
+
+
+def parse_server(text):
+    """'주소:포트' → (주소, 포트). 포트를 안 적으면 5051"""
+    t = text.strip()
+    if not t:
+        raise ValueError("서버 주소를 적어 주세요 (예: 192.168.0.12:5051)")
+    host, port = t.rsplit(":", 1) if ":" in t else (t, "5051")
+    if not host.strip() or not port.isdigit() or not 0 < int(port) < 65536:
+        raise ValueError("서버 주소 형식이 이상해요 (예: 192.168.0.12:5051)")
+    return host.strip(), int(port)
+
+
 class Net:
+    """온라인 연결. 중계 서버(relay_server.py)에 접속해서 5자리 방 번호로 상대와 이어져요.
+    이어진 뒤에는 서버가 메시지를 그대로 전달만 하고, 게임 계산은 방장(방을 만든 쪽) 컴퓨터가 해요.
+    받은 것은 q 에 (종류, ...) 로 쌓이고 화면 쪽이 주기적으로 꺼내 가요:
+      room(번호) / paired(역할) / msg(게임 메시지) / left(상대 퇴장) / error(문구) / disc(연결 끊김)"""
+
     def __init__(self):
         self.q = queue.Queue()
         self.sock = None
-        self.srv = None
         self.closed = False
         self.role = None
-        self.ready = False
+        self.ready = False          # (방장) 게임이 시작돼서 상태를 보내도 되는지
 
     def _reader(self, sock):
         buf = b""
@@ -239,11 +282,24 @@ class Net:
                 while b"\n" in buf:
                     line, buf = buf.split(b"\n", 1)
                     if line.strip():
-                        self.q.put(("msg", json.loads(line.decode("utf-8"))))
+                        self._dispatch(json.loads(line.decode("utf-8")))
         except (OSError, ValueError):
             pass
         if not self.closed:
             self.q.put(("disc",))
+
+    def _dispatch(self, m):
+        t = m.get("t") if isinstance(m, dict) else None
+        if t == "r_room":
+            self.q.put(("room", m.get("code", "")))
+        elif t == "r_paired":
+            self.q.put(("paired", m.get("role")))
+        elif t == "r_err":
+            self.q.put(("error", m.get("msg", "오류가 났어요.")))
+        elif t == "r_left":
+            self.q.put(("left",))
+        else:
+            self.q.put(("msg", m))
 
     def send(self, obj):
         if self.sock:
@@ -252,65 +308,40 @@ class Net:
             except OSError:
                 pass
 
-    def host(self):
+    def _open(self, server, first):
+        def run():
+            try:
+                sock = socket.create_connection(server, timeout=8)
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                sock.settimeout(None)
+            except OSError as e:
+                self.q.put(("error", f"서버에 연결하지 못했어요. 서버 주소가 맞는지, 서버가 켜져 있는지 확인해 주세요. ({e})"))
+                return
+            if self.closed:
+                sock.close()
+                return
+            self.sock = sock
+            self.send(first)
+            self._reader(sock)
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def create(self, server):
         self.role = "host"
+        self._open(server, {"t": "r_create"})
 
-        def pub(port):                       # 공인 IP 조회는 기다리지 않고 따로 (랙 방지)
-            ip = public_ip()
-            if ip and not self.closed:
-                self.q.put(("public", make_code(ip, port)))
-
-        def run():
-            try:
-                srv, port = open_server()
-                srv.settimeout(0.5)
-                self.srv = srv
-                self.q.put(("listening", make_code(local_ip(), port), port))
-                threading.Thread(target=pub, args=(port,), daemon=True).start()
-                sock = None
-                while not self.closed and sock is None:
-                    try:
-                        sock, addr = srv.accept()
-                    except socket.timeout:
-                        continue
-                srv.close()
-                if sock is None:
-                    return
-                sock.settimeout(None)
-            except OSError as e:
-                if not self.closed:
-                    self.q.put(("error", f"방을 열지 못했어요: {e}"))
-                return
-            self.sock = sock
-            self.q.put(("connected", addr[0]))
-            self._reader(sock)
-
-        threading.Thread(target=run, daemon=True).start()
-
-    def join(self, ip, port, deck):
+    def join(self, server, code):
         self.role = "guest"
-
-        def run():
-            try:
-                sock = socket.create_connection((ip, port), timeout=8)
-                sock.settimeout(None)
-            except OSError as e:
-                self.q.put(("error", f"접속하지 못했어요. 코드가 맞는지, 방이 열려 있는지 확인해 주세요. ({e})"))
-                return
-            self.sock = sock
-            self.send({"t": "hello", "deck": deck, "arena": True})
-            self._reader(sock)
-
-        threading.Thread(target=run, daemon=True).start()
+        self._open(server, {"t": "r_join", "code": code})
 
     def close(self):
         self.closed = True
-        for s in (self.sock, self.srv):
-            try:
-                if s:
-                    s.close()
-            except OSError:
-                pass
+        if self.sock:
+            for fn in (lambda: self.sock.shutdown(socket.SHUT_RDWR), self.sock.close):
+                try:                       # shutdown 을 먼저 해야 읽는 중인 스레드도 깨고 상대(서버)에게 끊김이 전달돼요
+                    fn()
+                except OSError:
+                    pass
 
 
 # ─── 소리 (효과음을 직접 만들어서 재생) ─────────────────────
@@ -413,60 +444,48 @@ class Sound:
 
 class ArenaRenderer:
     """아레나 화면 그리기. 요소를 한 번만 만들고, 매 프레임에는 좌표/색이 바뀐 것만 갱신해요.
-    (예전에는 매 프레임 전부 지우고 20~30개를 새로 만들어서 렉의 원인이었어요)"""
+    (예전에는 매 프레임 전부 지우고 20~30개를 새로 만들어서 렉의 원인이었어요)
+    카드의 arena.g 로 투사체 그림을 정해요: "arrow"=화살 모양 / 이모지(🔥🪨🐝 …)=그 글자 / 없으면 동그라미."""
     S = AR.SIZE
+    hover = (0.0, 0.0)
 
     def __init__(self, cv, spec, me_att, cid, pick_rects):
-        self.cv, self.mode, self.me_def = cv, spec["mode"], not me_att
+        self.cv, self.spec, self.mode, self.me_def, self.me_att = cv, spec, spec["mode"], not me_att, me_att
+        self.impl = "shoot" if self.mode in AR.SHOOTLIKE else self.mode
         self.cache, self.pools, self.flash = {}, {}, False
+        self.g, self.gs, self.fog_r = spec.get("g"), spec.get("gs", 16), spec.get("fog", 0)
+        self.dpos = (0.0, 0.0)
         S = self.S
         for i in range(1, 6):                                   # 바닥 격자 (정적)
             cv.create_line(i * 100, 0, i * 100, S, fill="#14141C")
             cv.create_line(0, i * 100, S, i * 100, fill="#14141C")
+        if self.mode == "knock":                                # 가시 벽
+            cv.create_rectangle(4, 4, S - 4, S - 4, outline="#FF3B3B", width=4, dash=(10, 6))
         self.d_oval = cv.create_oval(0, 0, 0, 0, fill="#3DD6F5", outline="#FFFFFF", width=2, state="hidden")
         self.d_tag = cv.create_text(0, 0, text="나" if self.me_def else "상대", fill="#BFEFFF",
                                     font=(FONT, 9, "bold"), state="hidden")
         self.bar = cv.create_rectangle(0, 0, 0, 5, fill="#FFB020", outline="")
         self.hud = cv.create_text(10, 22, text="", anchor="w", fill="#E6E6F0", font=(FONT, 11, "bold"))
-        m = self.mode
-        if m == "shoot":
-            self.aim = cv.create_line(0, 0, 0, 0, fill="#FF3B3B", width=2, dash=(7, 5), state="hidden")
-            self.tur = cv.create_rectangle(0, 0, 0, 0, fill="#8A8FA8", outline="#FF3B3B", width=2, state="hidden")
-        elif m == "swarm":
-            self.ring = cv.create_oval(0, 0, 0, 0, outline="#38D66B", width=2, dash=(3, 3), state="hidden")
-            self.cx1 = cv.create_line(0, 0, 0, 0, fill="#38D66B", state="hidden")
-            self.cx2 = cv.create_line(0, 0, 0, 0, fill="#38D66B", state="hidden")
-        elif m == "zone":
-            self.prev = cv.create_oval(0, 0, 0, 0, outline="#FF6B6B", width=2, dash=(6, 4), state="hidden")
-            self.arc = cv.create_arc(0, 0, 0, 0, start=90, extent=0, style="arc", outline="#FFD166", width=3, state="hidden")
-            self.dot = cv.create_oval(0, 0, 0, 0, fill="#FF6B6B", outline="", state="hidden")
-        elif m == "chase":
-            self.cx1 = cv.create_line(0, 0, 0, 0, fill="#FFD166", state="hidden")
-            self.cx2 = cv.create_line(0, 0, 0, 0, fill="#FFD166", state="hidden")
-            self.blade = cv.create_polygon(0, 0, 0, 0, 0, 0, 0, 0, fill="#FF5C5C", outline="#FFFFFF", width=2, state="hidden")
-        elif m == "pick":
-            self.boxes = []
-            for (x1, y1, x2, y2) in pick_rects:
-                r = cv.create_rectangle(x1, y1, x2, y2, fill="#2A2A38", outline="#8A8FA8", width=2)
-                t = cv.create_text((x1 + x2) / 2, (y1 + y2) / 2, text="", fill="#FFFFFF", font=(FONT, 28, "bold"))
-                self.boxes.append((r, t, (x1, y1, x2, y2)))
-            self.hint = cv.create_text(S / 2, 190, text="", fill="#FFD166", font=(FONT, 18, "bold"))
-            self.ptime = cv.create_text(S / 2, 430, text="", fill="#9AA0B5", font=(FONT, 12))
+        self.tw_txt = cv.create_text(S / 2, 48, text="", fill="#FFD166", font=(FONT, 13, "bold"), state="hidden")
+        self.fog_ring = cv.create_oval(0, 0, 0, 0, outline="#C8C8E0", width=2, dash=(3, 6), state="hidden")
+        if self.mode == "shield":
+            self.sh_arc = cv.create_arc(0, 0, 0, 0, style="arc", outline="#7FD1FF", width=6, start=0, extent=90, state="hidden")
+        getattr(self, "_i_" + self.impl)(pick_rects)
         # 안내 / 결과 오버레이 (처음부터 만들어 두고 보였다 숨겼다만 해요)
-        title, att_txt, def_txt = AR.HELP[m]
+        title, att_txt, def_txt = AR.help_for(spec)
         cx = S / 2
         self.intro = [
             cv.create_rectangle(40, 190, S - 40, 420, fill="#101018", outline="#FFD166", width=2, state="hidden"),
             cv.create_text(cx, 235, text=CARDS[cid]["name"], fill="#FFD166", font=(FONT, 30, "bold"), state="hidden"),
             cv.create_text(cx, 280, text="⚔ 당신이 공격!" if me_att else "🏃 당신이 피하세요!",
                            fill="#FF6B6B" if me_att else "#3DD6F5", font=(FONT, 20, "bold"), state="hidden"),
-            cv.create_text(cx, 335, text=att_txt if me_att else def_txt, fill="#E6E6F0", font=(FONT, 12), width=480,
+            cv.create_text(cx, 340, text=att_txt if me_att else def_txt, fill="#E6E6F0", font=(FONT, 12), width=480,
                            state="hidden"),
         ]
-        self.count = cv.create_text(cx, 395, text="", fill="#FFFFFF", font=(FONT, 28, "bold"), state="hidden")
-        self.res = [cv.create_rectangle(60, 250, S - 60, 350, fill="#101018", outline="#FFD166", width=2, state="hidden"),
-                    cv.create_text(cx, 300, text="", fill="#FFFFFF", font=(FONT, 24, "bold"), state="hidden")]
-        self.me_att = me_att
+        self.count = cv.create_text(cx, 397, text="", fill="#FFFFFF", font=(FONT, 28, "bold"), state="hidden")
+        self.res = [cv.create_rectangle(50, 225, S - 50, 375, fill="#101018", outline="#FFD166", width=2, state="hidden"),
+                    cv.create_text(cx, 300, text="", fill="#FFFFFF", font=(FONT, 20, "bold"), width=470,
+                                   justify="center", state="hidden")]
         self.intro_on = self.res_on = False
 
     # ── 도우미: 바뀐 것만 갱신 ──
@@ -487,25 +506,78 @@ class ArenaRenderer:
     def show(self, item, on=True):
         self.cfg(item, state="normal" if on else "hidden")
 
-    def pool(self, name, data, make, place):
-        lst = self.pools.setdefault(name, [])
-        for i, d in enumerate(data):
-            if i >= len(lst):
-                lst.append(make())
-            else:
-                self.show_group(lst[i], True)
-            place(lst[i], d)
-        for i in range(len(data), len(lst)):
-            self.show_group(lst[i], False)
+    def show_all(self, items, on=True):
+        for it in items:
+            self.show(it, on)
 
     def show_group(self, g, on):
         for it in (g if isinstance(g, tuple) else (g,)):
             self.show(it, on)
 
+    def vis(self, x, y):
+        """시야 제한(fog): 내 점에서 멀리 있는 건 안 보여요"""
+        return not self.fog_r or math.hypot(x - self.dpos[0], y - self.dpos[1]) <= self.fog_r
+
+    def pool(self, name, data, make, place):
+        lst = self.pools.setdefault(name, [])
+        for i, d in enumerate(data):
+            if i >= len(lst):
+                lst.append(make())
+            elif self.vis(d[0], d[1]):
+                self.show_group(lst[i], True)
+            place(lst[i], d)
+            if not self.vis(d[0], d[1]):
+                self.show_group(lst[i], False)
+        for i in range(len(data), len(lst)):
+            self.show_group(lst[i], False)
+
     def _low(self, g):
         for it in (g if isinstance(g, tuple) else (g,)):
             self.cv.tag_lower(it, self.d_oval)          # 새 요소는 플레이어 점 아래에
         return g
+
+    # ── 투사체 그림 (화살 / 글자 / 동그라미) ──
+    def mk_proj(self, color="#E8D9B0", size=None, outline="#FFFFFF"):
+        cv, g = self.cv, self.g
+        if g == "arrow":
+            return self._low(cv.create_line(0, 0, 0, 0, fill=color, width=3, arrow="last", arrowshape=(11, 13, 5)))
+        if g:
+            return self._low(cv.create_text(0, 0, text=g, font=(FONT, int(size or self.gs))))
+        return self._low(cv.create_oval(0, 0, 0, 0, fill=color, outline=outline))
+
+    def put_proj(self, it, x, y, r, ang=math.pi / 2, color=None, text=None):
+        g = self.g
+        if g == "arrow":
+            L = max(14, r * 2.6)
+            c, s = math.cos(ang) * L / 2, math.sin(ang) * L / 2
+            self.xy(it, x - c, y - s, x + c, y + s)
+            if color:
+                self.cfg(it, fill=color)
+        elif g:
+            self.xy(it, x, y)
+            if text:
+                self.cfg(it, text=text)
+        else:
+            self.xy(it, x - r, y - r, x + r, y + r)
+            if color:
+                self.cfg(it, fill=color)
+
+    def aim_cross(self, a, b, ax, ay, size=7):
+        self.xy(a, ax - size, ay, ax + size, ay)
+        self.xy(b, ax, ay - size, ax, ay + size)
+        self.show_all((a, b))
+
+    def mk_cross(self, color):
+        cv = self.cv
+        return (cv.create_line(0, 0, 0, 0, fill=color, state="hidden"), cv.create_line(0, 0, 0, 0, fill=color, state="hidden"))
+
+    @staticmethod
+    def wedge(ox, oy, ang, half, L, n=10):
+        pts = [ox, oy]
+        for i in range(n + 1):
+            a = ang - half + 2 * half * i / n
+            pts += [ox + math.cos(a) * L, oy + math.sin(a) * L]
+        return pts
 
     # ── 한 프레임 갱신 ──
     def update(self, s, ar, now):
@@ -518,13 +590,19 @@ class ArenaRenderer:
             if self.mode != "pick":
                 dx, dy = s["d"]
                 r = s["dr"]
+                self.dpos = (dx, dy)
                 self.xy(self.d_oval, dx - r, dy - r, dx + r, dy + r)
                 self.xy(self.d_tag, dx, dy - r - 9)
+                self.cfg(self.d_oval, fill="#7A8BFF" if s.get("dst") == 3 else "#3DD6F5")
                 self.show(self.d_oval)
                 self.show(self.d_tag)
+                if self.fog_r:
+                    self.xy(self.fog_ring, dx - self.fog_r, dy - self.fog_r, dx + self.fog_r, dy + self.fog_r)
+                    self.show(self.fog_ring)
             self.xy(self.bar, 0, 0, S * max(0.0, 1.0 - s["t"] / max(s["T"], 0.1)), 5)
-            getattr(self, "_m_" + self.mode)(s)
-        # 안내 오버레이
+            tw = s.get("tw")
+            self.cfg(self.tw_txt, text=AR.TWIST_TXT.get(tw, ""), state="normal" if tw else "hidden")
+            getattr(self, "_m_" + self.impl)(s)
         intro = ar["phase"] == "intro"
         if intro != self.intro_on:
             self.intro_on = intro
@@ -534,7 +612,6 @@ class ArenaRenderer:
                     cv.tag_raise(it)
         if intro:
             self.cfg(self.count, text=str(int(max(0.0, ARENA_INTRO - (now - ar["t0"]))) + 1))
-        # 결과 오버레이
         res = ar["phase"] == "result" and ar["result"] is not None
         if res != self.res_on:
             self.res_on = res
@@ -543,16 +620,29 @@ class ArenaRenderer:
                 if res:
                     cv.tag_raise(it)
         if res:
-            r = ar["result"]
-            if self.mode == "pick":
-                txt = "안전한 상자! 🍀" if r.get("safe") else "위험한 상자! 💥"
-            elif self.me_att:
-                txt = f"💥 {r['dmg']} 피해를 입혔어요!" if r["dmg"] else "😤 모두 피했어요…"
-            else:
-                txt = f"💢 {r['dmg']} 피해를 입었어요!" if r["dmg"] else "😎 모두 피했어요!"
-            self.cfg(self.res[1], text=txt)
+            self.cfg(self.res[1], text=self.result_text(ar["result"]))
 
-    # ── 모드별 갱신 ──
+    def result_text(self, r):
+        if self.mode == "pick":
+            return "안전한 상자! 🍀" if r.get("safe") else "위험한 상자! 💥"
+        d, me, sd, sh, fh = r["dmg"], self.me_att, r.get("self", 0), r.get("sheal", 0), r.get("fheal", 0)
+        t = [(f"💥 {d} 피해를 입혔어요!" if d else "😤 못 맞혔어요…") if me else
+             (f"💢 {d} 피해를 입었어요!" if d else "😎 모두 피했어요!")]
+        if sd:
+            t.append(f"⚔ 반격당해 {sd} 피해를 입었어요!" if me else f"⚔ 반격 성공! 상대가 {sd} 피해!")
+        if sh:
+            t.append(f"💚 체력 {sh} 회복!" if me else f"💚 상대가 {sh} 회복했어요…")
+        if fh:
+            t.append(f"💚 구슬을 먹어 {fh} 회복!" if not me else f"😖 상대가 {fh} 회복했어요…")
+        return "\n".join(t)
+
+    # ══════ 방식별 그리기 ══════
+    # ── shoot / shield / gamble / knock ──
+    def _i_shoot(self, _):
+        cv = self.cv
+        self.aim = cv.create_line(0, 0, 0, 0, fill="#FF3B3B", width=2, dash=(7, 5), state="hidden")
+        self.tur = cv.create_rectangle(0, 0, 0, 0, fill="#8A8FA8", outline="#FF3B3B", width=2, state="hidden")
+
     def _m_shoot(self, s):
         tx, ty = s["tur"]
         self.xy(self.tur, tx - 9, ty - 9, tx + 9, ty + 9)
@@ -576,23 +666,55 @@ class ArenaRenderer:
         else:
             self.show(self.aim, False)
         br = s["br"]
-        self.pool("b", s["b"], lambda: self._low(self.cv.create_oval(0, 0, 0, 0, fill="#E8D9B0", outline="#FFFFFF")),
-                  lambda it, d: self.xy(it, d[0] - br, d[1] - br, d[0] + br, d[1] + br))
-        self.cfg(self.hud, text=f"남은 탄 {s['left']}", fill="#E8D9B0")
+        gamble, kinds = self.mode == "gamble", {0: "#FF5C5C", 1: "#38D66B", 2: "#B070FF"}
+        base = "#FF5C5C" if gamble else "#E8D9B0"
+        if gamble and not self.g:
+            kinds[0] = base
+        self.pool("b", s["b"], lambda: self.mk_proj(base),
+                  lambda it, d: self.put_proj(it, d[0], d[1], br, d[3],
+                                              kinds.get(d[2], base) if (d[2] or gamble) else None,
+                                              self.gk_text(d[2])))
+        if "sh" in s:                                           # 방패
+            ang, half, sr, on, hp = s["sh"]
+            dx, dy = s["d"]
+            if self.me_def:                                     # 내 방패는 내 마우스를 바로 따라가요
+                ang = math.atan2(s["da"][1] - dy, s["da"][0] - dx)
+            da = math.degrees(-ang)
+            self.xy(self.sh_arc, dx - sr, dy - sr, dx + sr, dy + sr)
+            self.cfg(self.sh_arc, start=round(da - math.degrees(half), 1), extent=round(2 * math.degrees(half), 1),
+                     outline=("#7FD1FF" if hp > 0.5 else "#FFD166" if hp > 0.25 else "#FF8A5C") if on else "#3A3A55",
+                     width=6 if on else 2)
+            self.show(self.sh_arc)
+        self.cfg(self.hud, text=f"남은 {'구슬' if gamble else '발'} {s['left']}", fill="#E8D9B0")
+
+    def gk_text(self, kind):
+        return {1: "💚", 2: "🔮"}.get(kind, self.g if self.g != "arrow" else None)
+
+    # ── swarm ──
+    def _i_swarm(self, _):
+        cv = self.cv
+        self.ring = cv.create_oval(0, 0, 0, 0, outline="#38D66B", width=2, dash=(3, 3), state="hidden")
+        self.cx1, self.cx2 = self.mk_cross("#38D66B")
 
     def _m_swarm(self, s):
         ax, ay = s["aim"]
         self.xy(self.ring, ax - 14, ay - 14, ax + 14, ay + 14)
-        self.xy(self.cx1, ax - 6, ay, ax + 6, ay)
-        self.xy(self.cx2, ax, ay - 6, ax, ay + 6)
-        for it in (self.ring, self.cx1, self.cx2):
-            self.show(it)
+        self.show(self.ring)
+        self.aim_cross(self.cx1, self.cx2, ax, ay, 6)
         r = s["ar"]
-        self.pool("a", s["a"], lambda: self._low(self.cv.create_oval(0, 0, 0, 0, fill="#38D66B", outline="#B8FFCB")),
-                  lambda it, d: self.xy(it, d[0] - r, d[1] - r, d[0] + r, d[1] + r))
-        self.cfg(self.hud, text=f"남은 개미 {s['left']}", fill="#38D66B")
+        self.pool("a", s["a"], lambda: self.mk_proj("#38D66B", 11, "#B8FFCB"),
+                  lambda it, d: self.put_proj(it, d[0], d[1], r))
+        self.cfg(self.hud, text=f"남은 {s['left']}마리", fill="#38D66B")
+
+    # ── zone ──
+    def _i_zone(self, _):
+        cv = self.cv
+        self.prev = cv.create_oval(0, 0, 0, 0, outline="#FF6B6B", width=2, dash=(6, 4), state="hidden")
+        self.arc = cv.create_arc(0, 0, 0, 0, start=90, extent=0, style="arc", outline="#FFD166", width=3, state="hidden")
+        self.dot = cv.create_oval(0, 0, 0, 0, fill="#FF6B6B", outline="", state="hidden")
 
     def _m_zone(self, s):
+        items = (self.prev, self.arc, self.dot)
         if s["left"] > 0:
             ax, ay = s["aim"]
             r = s["r"]
@@ -600,59 +722,434 @@ class ArenaRenderer:
             self.xy(self.arc, ax - r - 6, ay - r - 6, ax + r + 6, ay + r + 6)
             self.cfg(self.arc, extent=round(-359.9 * s["ch"], 1))
             self.xy(self.dot, ax - 3, ay - 3, ax + 3, ay + 3)
-            for it in (self.prev, self.arc, self.dot):
-                self.show(it)
+            self.show_all(items)
         else:
-            for it in (self.prev, self.arc, self.dot):
-                self.show(it, False)
+            self.show_all(items, False)
         warn = max(s["warn"], 0.01)
+        g = self.g
 
         def make():
             cv = self.cv
             return self._low((cv.create_oval(0, 0, 0, 0, fill="#4A1212", outline="#FF3B3B", width=2),
                               cv.create_oval(0, 0, 0, 0, fill="#B81D1D", outline=""),
-                              cv.create_oval(0, 0, 0, 0, outline="#FFD166", dash=(2, 3))))
+                              cv.create_oval(0, 0, 0, 0, outline="#FFD166", dash=(2, 3)),
+                              cv.create_text(0, 0, text=g or "", font=(FONT, 20))))
 
-        def place(g, z):
+        def place(grp, z):
             x, y, r, st, t = z
-            outer, inner, ring = g
+            outer, inner, ring, txt = grp
             self.xy(outer, x - r, y - r, x + r, y + r)
             if st == 0:
                 k = min(1.0, t / warn)
                 self.cfg(outer, fill="#4A1212", outline="#FF3B3B")
                 self.xy(inner, x - r * k, y - r * k, x + r * k, y + r * k)
                 self.xy(ring, x - r * 0.4, y - r * 0.4, x + r * 0.4, y + r * 0.4)
-                self.show(inner)
-                self.show(ring)
+                self.show_all((inner, ring))
+                self.show(txt, False)
             else:
                 self.cfg(outer, fill="#FFB020" if st == 1 else "#1B4D27", outline="#FFFFFF" if st == 1 else "#9BE59D")
-                self.show(inner, False)
-                self.show(ring, False)
+                self.show_all((inner, ring), False)
+                if g:
+                    self.xy(txt, x, y)
+                    self.cfg(txt, font=(FONT, max(14, int(r * 0.8))))
+                self.show(txt, bool(g))
         self.pool("z", s["z"], make, place)
         self.cfg(self.hud, text=f"남은 폭격 {s['left']}", fill="#FF6B6B")
 
-    def _m_chase(self, s):
-        ax, ay = s["aim"]
-        self.xy(self.cx1, ax - 8, ay, ax + 8, ay)
-        self.xy(self.cx2, ax, ay - 8, ax, ay + 8)
-        x, y = s["c"]
-        r = s["cr"]
-        self.xy(self.blade, x, y - r, x + r, y, x, y + r, x - r, y)
-        for it in (self.cx1, self.cx2, self.blade):
-            self.show(it)
+    # ── rain: 위에서 쏟아짐 ──
+    def _i_rain(self, _):
+        self._i_zone(_)
 
-    def _m_bounce(self, s):
-        r = s["dcr"]
+    def _m_rain(self, s):
+        items = (self.prev, self.arc, self.dot)
+        if s["left"] > 0 and not s["auto"]:
+            ax, ay = s["aim"]
+            r = s["r"]
+            self.xy(self.prev, ax - r, ay - r, ax + r, ay + r)
+            self.xy(self.arc, ax - r - 6, ay - r - 6, ax + r + 6, ay + r + 6)
+            self.cfg(self.arc, extent=round(-359.9 * s["ch"], 1))
+            self.xy(self.dot, ax - 3, ay - 3, ax + 3, ay + 3)
+            self.show_all(items)
+        else:
+            self.show_all(items, False)
+        rr, slant, g = s["rr"], s["slant"], self.g
 
         def make():
             cv = self.cv
-            return self._low((cv.create_rectangle(0, 0, 0, 0, fill="#F5F5F5", outline="#222"),
-                              cv.create_text(0, 0, text="🎲", font=(FONT, int(r)))))
+            return self._low((cv.create_oval(0, 0, 0, 0, outline="#FF3B3B", width=2, dash=(3, 3)),     # 착탄 표식
+                              self.mk_proj("#FFE08A", 15),                                             # 떨어지는 것
+                              cv.create_oval(0, 0, 0, 0, fill="#FFB020", outline="#FFFFFF"),            # 착탄 폭발
+                              cv.create_text(0, 0, text=g if g and g != "arrow" else "", font=(FONT, 18))))
 
-        def place(g, d):
-            self.xy(g[0], d[0] - r, d[1] - r, d[0] + r, d[1] + r)
-            self.xy(g[1], d[0], d[1])
+        def place(grp, d):
+            x, y, p, st = d
+            mark, proj, burst, fire = grp
+            if st == 0:
+                self.xy(mark, x - rr, y - rr, x + rr, y + rr)
+                px = x + slant * (y + 40) * (1 - p)
+                py = -40 + (y + 40) * p
+                self.put_proj(proj, px, py, 8, math.atan2(1.0, -slant))
+                self.show_all((mark, proj))
+                self.show_all((burst, fire), False)
+            else:
+                self.xy(burst, x - rr, y - rr, x + rr, y + rr)
+                self.cfg(burst, fill="#FFB020" if st == 1 else "#7A2E0E", outline="#FFFFFF" if st == 1 else "#FF8A3D")
+                self.show(burst)
+                self.show_all((mark, proj), False)
+                if st == 2 and g and g != "arrow":
+                    self.xy(fire, x, y)
+                self.show(fire, st == 2 and bool(g) and g != "arrow")
+        self.pool("r", s["rn"], make, place)
+        self.cfg(self.hud, text=f"남은 공격 {s['left']}", fill="#FFD166")
+
+    # ── cone: 부채꼴 ──
+    def _i_cone(self, _):
+        cv = self.cv
+        self.tur = cv.create_rectangle(0, 0, 0, 0, fill="#8A8FA8", outline="#FF3B3B", width=2, state="hidden")
+        self.prev = self._low(cv.create_polygon(0, 0, 0, 0, 0, 0, fill="", outline="#FF6B6B", width=2, dash=(6, 4), state="hidden"))
+
+    def _m_cone(self, s):
+        tx, ty = s["tur"]
+        self.xy(self.tur, tx - 9, ty - 9, tx + 9, ty + 9)
+        self.show(self.tur)
+        half, L = s["half"], s["cl"]
+        if s["left"] > 0:
+            self.xy(self.prev, *self.wedge(tx, ty, s["aa"], half, L))
+            self.show(self.prev)
+        else:
+            self.show(self.prev, False)
+        g = self.g or "🔥"
+        warn = max(s["warn"], 0.01)
+
+        def make():
+            cv = self.cv
+            return self._low((cv.create_polygon(0, 0, 0, 0, 0, 0, fill="#4A1212", outline="#FF3B3B", width=2),
+                              cv.create_polygon(0, 0, 0, 0, 0, 0, fill="#B81D1D", outline=""),
+                              cv.create_text(0, 0, text=g, font=(FONT, 24)), cv.create_text(0, 0, text=g, font=(FONT, 30)),
+                              cv.create_text(0, 0, text=g, font=(FONT, 22))))
+
+        def place(grp, c):
+            x, y, ang, t, st = c
+            outer, inner, f1, f2, f3 = grp
+            self.xy(outer, *self.wedge(x, y, ang, half, L))
+            if st == 0:
+                k = min(1.0, t / warn)
+                self.cfg(outer, fill="#4A1212", outline="#FF3B3B")
+                self.xy(inner, *self.wedge(x, y, ang, half, L * k))
+                self.show(inner)
+                self.show_all((f1, f2, f3), False)
+            else:
+                self.cfg(outer, fill="#FFB020", outline="#FFFFFF")
+                self.show(inner, False)
+                for f, k in ((f1, 0.3), (f2, 0.6), (f3, 0.88)):
+                    self.xy(f, x + math.cos(ang) * L * k, y + math.sin(ang) * L * k)
+                    self.show(f)
+        self.pool("c", s["cn"], make, place)
+        self.cfg(self.hud, text=f"남은 발사 {s['left']}", fill="#FF6B6B")
+
+    # ── beam: 레이저 ──
+    def _i_beam(self, _):
+        cv = self.cv
+        self.tur = cv.create_rectangle(0, 0, 0, 0, fill="#8A8FA8", outline="#FF3B3B", width=2, state="hidden")
+        self.prev = self._low(cv.create_line(0, 0, 0, 0, fill="#FF6B6B", width=2, dash=(7, 5), state="hidden"))
+        self.b_out = self._low(cv.create_line(0, 0, 0, 0, fill="#FF5C3B", width=10, state="hidden"))
+        self.b_core = self._low(cv.create_line(0, 0, 0, 0, fill="#FFFFFF", width=4, state="hidden"))
+
+    def _m_beam(self, s):
+        tx, ty = s["tur"]
+        self.xy(self.tur, tx - 9, ty - 9, tx + 9, ty + 9)
+        self.show(self.tur)
+        b, far = s["bm"], 1100
+        if b:
+            x, y, a, st, t = b
+            ex, ey = x + math.cos(a) * far, y + math.sin(a) * far
+            self.xy(self.b_out, x, y, ex, ey)
+            self.xy(self.b_core, x, y, ex, ey)
+            if st == 0:                                          # 충전: 가는 선 (점점 굵어져요)
+                k = min(1.0, t / max(s["warn"], 0.01))
+                self.cfg(self.b_out, width=2 + int(4 * k), fill="#FF3B3B")
+                self.cfg(self.b_core, width=1)
+                self.show(self.b_out)
+                self.show(self.b_core, False)
+            else:
+                self.cfg(self.b_out, width=int(s["bw"] * 1.4), fill="#FF8A3D")
+                self.cfg(self.b_core, width=max(3, int(s["bw"] * 0.5)))
+                self.show_all((self.b_out, self.b_core))
+            self.show(self.prev, False)
+        else:
+            self.show_all((self.b_out, self.b_core), False)
+            if s["left"] > 0:
+                a = s["aa"]
+                self.xy(self.prev, tx, ty, tx + math.cos(a) * far, ty + math.sin(a) * far)
+                self.show(self.prev)
+            else:
+                self.show(self.prev, False)
+        self.cfg(self.hud, text=f"남은 레이저 {s['left']}", fill="#FF8A3D")
+
+    # ── chase ──
+    def _i_chase(self, _):
+        cv = self.cv
+        self.cx1, self.cx2 = self.mk_cross("#FFD166")
+        self.blade = self._low(cv.create_polygon(0, 0, 0, 0, 0, 0, 0, 0, fill="#FF5C5C", outline="#FFFFFF", width=2, state="hidden"))
+        self.bglyph = self._low(cv.create_text(0, 0, text=self.g or "", font=(FONT, 20), state="hidden"))
+
+    def _m_chase(self, s):
+        ax, ay = s["aim"]
+        self.aim_cross(self.cx1, self.cx2, ax, ay, 8)
+        x, y = s["c"]
+        r = s["cr"]
+        vis = self.vis(x, y)
+        if self.g:
+            self.xy(self.bglyph, x, y)
+            self.cfg(self.bglyph, font=(FONT, max(14, int(r * 1.5))))
+            self.show(self.bglyph, vis)
+            self.show(self.blade, False)
+        else:
+            self.xy(self.blade, x, y - r, x + r, y, x, y + r, x - r, y)
+            self.show(self.blade, vis)
+
+    # ── orbit: 회전 칼날 구체 ──
+    def _i_orbit(self, _):
+        cv = self.cv
+        self.cx1, self.cx2 = self.mk_cross("#FFD166")
+        self.o_body = self._low(cv.create_oval(0, 0, 0, 0, fill="#5A2A8A", outline="#FFFFFF", width=2, state="hidden"))
+        self.o_txt = self._low(cv.create_text(0, 0, text="✦", fill="#FFFFFF", font=(FONT, 16, "bold"), state="hidden"))
+
+    def _m_orbit(self, s):
+        ox, oy = s["o"]
+        ax, ay = s["aim"]
+        self.aim_cross(self.cx1, self.cx2, ax, ay, 8)
+        b = s["body"]
+        vis = self.vis(ox, oy)
+        self.xy(self.o_body, ox - b, oy - b, ox + b, oy + b)
+        self.cfg(self.o_body, fill="#FF5C8A" if s["bst"] else "#5A2A8A")
+        self.xy(self.o_txt, ox, oy)
+        self.show_all((self.o_body, self.o_txt), vis)
+        L, nb, th, bw, g = s["bl"], s["nb"], s["th"], s["bw"], self.g
+
+        def make():
+            cv = self.cv
+            return self._low((cv.create_line(0, 0, 0, 0, fill="#C8D0E0", width=int(bw * 0.7)),
+                              cv.create_text(0, 0, text=g or "🗡", font=(FONT, 20))))
+        data = [(ox + math.cos(th + i * math.tau / nb) * L, oy + math.sin(th + i * math.tau / nb) * L, ox, oy) for i in range(nb)]
+
+        def place(grp, d):
+            self.xy(grp[0], d[2], d[3], d[0], d[1])
+            self.xy(grp[1], d[0], d[1])
+            self.cfg(grp[0], fill="#FF8AB0" if s["bst"] else "#C8D0E0")
+        self.pool("bl", data, make, place)
+        if not vis:
+            for grp in self.pools.get("bl", []):
+                self.show_group(grp, False)
+
+    # ── duel: 칼싸움 ──
+    def _i_duel(self, _):
+        cv = self.cv
+        self.a_oval = self._low(cv.create_oval(0, 0, 0, 0, fill="#FF5C5C", outline="#FFFFFF", width=2, state="hidden"))
+        self.a_tag = self._low(cv.create_text(0, 0, text="나" if self.me_att else "상대", fill="#FFD0D0",
+                                              font=(FONT, 9, "bold"), state="hidden"))
+        self.a_arc = self._low(cv.create_arc(0, 0, 0, 0, style="pieslice", fill="#5A2222", outline="#FF8A8A", state="hidden"))
+        self.d_arc = self._low(cv.create_arc(0, 0, 0, 0, style="pieslice", fill="#1F3A5A", outline="#8AD1FF", state="hidden"))
+        self.a_sw = self._low(cv.create_text(0, 0, text="🗡", font=(FONT, 22), state="hidden"))
+        self.d_sw = self._low(cv.create_text(0, 0, text="🗡", font=(FONT, 22), state="hidden"))
+        self.a_ln = self._low(cv.create_line(0, 0, 0, 0, fill="#FFB0B0", width=4, state="hidden"))
+        self.d_ln = self._low(cv.create_line(0, 0, 0, 0, fill="#B0E0FF", width=4, state="hidden"))
+        self.stun_a = cv.create_text(0, 0, text="💫", font=(FONT, 16), state="hidden")
+        self.stun_d = cv.create_text(0, 0, text="💫", font=(FONT, 16), state="hidden")
+
+    def _fighter(self, x, y, face, lock, st, prog, reach, arc, arc_it, ln, sw, stun, tint):
+        wind, rec = st == 1, st == 2
+        if wind:                                                 # 베는 동안 칼이 호를 쓸고 지나가요
+            ang = lock - arc + 2 * arc * prog
+        elif rec:
+            ang = lock + arc
+        else:
+            ang = face
+        L = reach * 0.92
+        ex, ey = x + math.cos(ang) * L, y + math.sin(ang) * L
+        self.xy(ln, x, y, ex, ey)
+        self.xy(sw, ex, ey)
+        self.show_all((ln, sw), st != 3)
+        self.cfg(ln, fill="#6A6A7A" if rec else tint)
+        if wind:
+            R = reach
+            self.xy(arc_it, x - R, y - R, x + R, y + R)
+            self.cfg(arc_it, start=round(math.degrees(-lock) - math.degrees(arc), 1), extent=round(2 * math.degrees(arc), 1))
+        self.show(arc_it, wind)
+        self.xy(stun, x, y - 24)
+        self.show(stun, st == 3)
+
+    def _m_duel(self, s):
+        ax, ay = s["a"]
+        self.xy(self.a_oval, ax - 10, ay - 10, ax + 10, ay + 10)
+        self.xy(self.a_tag, ax, ay - 19)
+        self.show_all((self.a_oval, self.a_tag))
+        dx, dy = s["d"]
+        self._fighter(ax, ay, s["af"], s["al"], s["ast"], s["ap"], s["reach"], s["arc"], self.a_arc, self.a_ln, self.a_sw, self.stun_a, "#FFB0B0")
+        self._fighter(dx, dy, s["df"], s["dl"], s["dst"], s["dp"], s["reach"], s["arc"], self.d_arc, self.d_ln, self.d_sw, self.stun_d, "#B0E0FF")
+        self.cfg(self.hud, text="베기: 클릭" if self.me_att else "베기: 클릭 / 스페이스", fill="#FFB0B0")
+
+    # ── vortex: 블랙홀 ──
+    def _i_vortex(self, _):
+        cv = self.cv
+        self.v_pull = self._low(cv.create_oval(0, 0, 0, 0, outline="#7A4AD6", width=2, dash=(4, 6), state="hidden"))
+        self.v_boom = self._low(cv.create_oval(0, 0, 0, 0, outline="#FF3B3B", width=2, dash=(5, 4), state="hidden"))
+        self.v_boom_f = self._low(cv.create_oval(0, 0, 0, 0, fill="#B81D1D", outline="", state="hidden"))
+        self.v_core = self._low(cv.create_oval(0, 0, 0, 0, fill="#07030F", outline="#B070FF", width=3, state="hidden"))
+        self.v_txt = self._low(cv.create_text(0, 0, text=self.g or "🌀", font=(FONT, 26), state="hidden"))
+        self.cx1, self.cx2 = self.mk_cross("#B070FF")
+
+    def _m_vortex(self, s):
+        hx, hy = s["h"]
+        rp, rc = s["rp"], s["rc"]
+        vis = self.vis(hx, hy)
+        self.xy(self.v_pull, hx - rp, hy - rp, hx + rp, hy + rp)
+        self.xy(self.v_core, hx - rc, hy - rc, hx + rc, hy + rc)
+        self.xy(self.v_txt, hx, hy)
+        self.show_all((self.v_pull, self.v_core, self.v_txt), vis)
+        if s["boom"] and s["bp"] > 0:
+            R = s["boom"]
+            self.xy(self.v_boom, hx - R, hy - R, hx + R, hy + R)
+            k = s["bp"]
+            self.xy(self.v_boom_f, hx - R * k, hy - R * k, hx + R * k, hy + R * k)
+            self.show_all((self.v_boom, self.v_boom_f), vis)
+        else:
+            self.show_all((self.v_boom, self.v_boom_f), False)
+        if self.me_att:
+            self.aim_cross(self.cx1, self.cx2, *s["aim"], 7)
+
+    # ── warp: 차원문 ──
+    def _i_warp(self, _):
+        self.cx1, self.cx2 = self.mk_cross("#B070FF")
+
+    def _m_warp(self, s):
+        pr, er, warn = s["pr"], s["er"], max(s["warn"], 0.01)
+        if self.me_att and s["left"] > 0:
+            self.aim_cross(self.cx1, self.cx2, *s["aim"], 9)
+
+        def make():
+            cv = self.cv
+            return self._low((cv.create_oval(0, 0, 0, 0, outline="#FF8A3D", width=2, dash=(4, 4)),          # 출구
+                              cv.create_text(0, 0, text="❓", font=(FONT, 14)),
+                              cv.create_line(0, 0, 0, 0, fill="#7A4AD6", dash=(3, 5)),                        # 연결선
+                              cv.create_oval(0, 0, 0, 0, fill="#2A0F4A", outline="#B070FF", width=3),         # 입구
+                              cv.create_text(0, 0, text="🌀", font=(FONT, 22))))
+
+        def place(grp, p):
+            x, y, xx, xy_, age = p
+            ex, ring, link, ent, txt = grp
+            on = age >= 0.35
+            self.xy(ent, x - pr, y - pr, x + pr, y + pr)
+            self.cfg(ent, outline="#E0B0FF" if on else "#5A3A7A", fill="#2A0F4A" if on else "#150826")
+            self.xy(txt, x, y)
+            self.xy(ex, xx - er * 0.5, xy_ - er * 0.5, xx + er * 0.5, xy_ + er * 0.5)
+            self.xy(ring, xx, xy_)
+            self.xy(link, x, y, xx, xy_)
+        self.pool("p", s["pt"], make, place)
+
+        def make2():
+            cv = self.cv
+            return self._low((cv.create_oval(0, 0, 0, 0, fill="#4A1212", outline="#FF3B3B", width=2),
+                              cv.create_oval(0, 0, 0, 0, fill="#B81D1D", outline="")))
+
+        def place2(grp, b):
+            x, y, t = b
+            k = min(1.0, t / warn)
+            self.xy(grp[0], x - er, y - er, x + er, y + er)
+            self.xy(grp[1], x - er * k, y - er * k, x + er * k, y + er * k)
+        self.pool("w", s["bl"], make2, place2)
+        self.cfg(self.hud, text=f"남은 차원문 {s['left']}", fill="#B070FF")
+
+    # ── grid: 심판의 격자 ──
+    def _i_grid(self, _):
+        cv, n = self.cv, int(self.spec.get("n", 3))
+        cs = self.S / n
+        self.cells = {}
+        for i in range(n):
+            for j in range(n):
+                self.cells[(i, j)] = self._low(cv.create_rectangle(i * cs + 3, j * cs + 3, (i + 1) * cs - 3, (j + 1) * cs - 3,
+                                                                    fill="", outline="#2A2A3A", width=2))
+        self.cursor = cv.create_rectangle(0, 0, 0, 0, outline="#FFD166", width=3, dash=(6, 4), state="hidden")
+        self.gn, self.cs = n, cs
+
+    def _m_grid(self, s):
+        state = {}
+        for i, j, t, st in s["gc"]:
+            state[(i, j)] = (t, st)
+        warn = max(s["warn"], 0.01)
+        for key, it in self.cells.items():
+            if key in state:
+                t, st = state[key]
+                if st == 0:
+                    pulse = int(t / warn * 6) % 2
+                    self.cfg(it, fill="#5A1616" if pulse else "#4A1212", outline="#FF3B3B")
+                else:
+                    self.cfg(it, fill="#FFB020", outline="#FFFFFF")
+            else:
+                self.cfg(it, fill="", outline="#2A2A3A")
+        if self.me_att and s["left"] > 0 and not self.spec.get("auto"):
+            ax, ay = s["aim"]
+            i, j = int(min(self.gn - 1, ax // self.cs)), int(min(self.gn - 1, ay // self.cs))
+            self.xy(self.cursor, i * self.cs + 6, j * self.cs + 6, (i + 1) * self.cs - 6, (j + 1) * self.cs - 6)
+            self.show(self.cursor)
+        else:
+            self.show(self.cursor, False)
+        self.cfg(self.hud, text=f"남은 {'심판' if self.spec.get('auto') else '칸'} {s['left']}", fill="#FF6B6B")
+
+    # ── channel: 치유 의식 ──
+    def _i_channel(self, _):
+        cv = self.cv
+        self.c_circ = self._low(cv.create_oval(0, 0, 0, 0, fill="#10301C", outline="#38D66B", width=3, state="hidden"))
+        self.c_arc = self._low(cv.create_arc(0, 0, 0, 0, start=90, extent=0, style="arc", outline="#FFD166", width=5, state="hidden"))
+        self.c_txt = self._low(cv.create_text(0, 0, text=self.g or "✚", fill="#9BE59D", font=(FONT, 30, "bold"), state="hidden"))
+        self.c_pct = self._low(cv.create_text(0, 0, text="", fill="#FFFFFF", font=(FONT, 12, "bold"), state="hidden"))
+        self.cx1, self.cx2 = self.mk_cross("#38D66B")
+
+    def _m_channel(self, s):
+        x, y, r = s["ch"]
+        vis = self.vis(x, y)
+        self.xy(self.c_circ, x - r, y - r, x + r, y + r)
+        self.cfg(self.c_circ, fill="#3A1414" if s["inn"] else "#10301C", outline="#FF6B6B" if s["inn"] else "#38D66B")
+        self.xy(self.c_arc, x - r - 7, y - r - 7, x + r + 7, y + r + 7)
+        self.cfg(self.c_arc, extent=round(-359.9 * s["pg"], 1))
+        self.xy(self.c_txt, x, y - 4)
+        self.xy(self.c_pct, x, y + 22)
+        self.cfg(self.c_pct, text=f"+{round(s['heal'] * s['pg'])}")
+        self.show_all((self.c_circ, self.c_arc, self.c_txt, self.c_pct), vis)
+        if self.me_att:
+            self.aim_cross(self.cx1, self.cx2, *s["aim"], 7)
+        msg = "💥 방해받는 중!" if s["inn"] else ("🌀 순간이동 가능: 클릭" if s["bk"] <= 0 and self.me_att else "의식 진행 중")
+        self.cfg(self.hud, text=msg, fill="#FF6B6B" if s["inn"] else "#9BE59D")
+
+    # ── bounce ──
+    def _i_bounce(self, _):
+        pass
+
+    def _m_bounce(self, s):
+        r, g = s["dcr"], self.g
+
+        def make():
+            cv = self.cv
+            return self._low((cv.create_rectangle(0, 0, 0, 0, fill="#F5F5F5", outline="#222", state="normal" if not g else "hidden"),
+                              cv.create_text(0, 0, text=g or "🎲", font=(FONT, int(r * (1.3 if g else 1.0))))))
+
+        def place(grp, d):
+            self.xy(grp[0], d[0] - r, d[1] - r, d[0] + r, d[1] + r)
+            self.xy(grp[1], d[0], d[1])
+            if g:
+                self.show(grp[0], False)
         self.pool("d", s["dc"], make, place)
+
+    # ── pick ──
+    def _i_pick(self, pick_rects):
+        cv, S = self.cv, self.S
+        self.boxes = []
+        for (x1, y1, x2, y2) in pick_rects:
+            r = cv.create_rectangle(x1, y1, x2, y2, fill="#2A2A38", outline="#8A8FA8", width=2)
+            t = cv.create_text((x1 + x2) / 2, (y1 + y2) / 2, text="", fill="#FFFFFF", font=(FONT, 28, "bold"))
+            self.boxes.append((r, t, (x1, y1, x2, y2)))
+        self.hint = cv.create_text(S / 2, 190, text="", fill="#FFD166", font=(FONT, 18, "bold"))
+        self.ptime = cv.create_text(S / 2, 430, text="", fill="#9AA0B5", font=(FONT, 12))
 
     def _m_pick(self, s):
         picked, danger = s["picked"], s.get("danger") or []
@@ -672,8 +1169,6 @@ class ArenaRenderer:
         self.cfg(self.hint, text=hint)
         self.cfg(self.ptime, text=f"남은 시간 {max(0.0, s['T'] - s['t']):0.1f}초" if picked is None else "")
 
-    hover = (0.0, 0.0)
-
 
 # ─── 앱 ─────────────────────────────────────────────────
 class App:
@@ -688,6 +1183,8 @@ class App:
         self.view = None
         self.sel_id = None
         self.net = None
+        self.deck_back = "menu"          # 덱 화면의 '뒤로' 목적지 (메뉴 / 대기실)
+        self.reset_lobby_state()
         self.ai_job = None
         self.prev_hp = None
         self.msg_job = None
@@ -713,8 +1210,9 @@ class App:
         self.root.update()                    # 메뉴를 먼저 그려서 창이 바로 보이게 하고
         self.build_deck()                     # 나머지 화면은 그 뒤에 만들어요
         self.build_online()
+        self.build_lobby()
         self.build_battle()
-        self.root.after(80, self.poll)
+        self.root.after(15, self.poll)
 
     def run(self):
         self.root.mainloop()
@@ -736,7 +1234,10 @@ class App:
         if name == "menu":
             self.update_menu()
         if name == "deck":
+            self.deck_back_btn.set_text("← 대기실" if self.deck_back == "lobby" else "← 메뉴")
             self.update_deck_ui()
+        if name == "lobby":
+            self.lobby_sync()
 
     def deck_ok(self):
         err = validate_deck(self.deck)
@@ -757,7 +1258,7 @@ class App:
         self.menu_deck_lbl.pack(pady=(0, 10))
         items = [("⚔  AI 대전", self.start_ai, PRIMARY, PRIMARY_H, PRIMARY_P),
                  ("🌐  방 만들기 / 참가 (온라인)", lambda: self.show("online"), SECONDARY, SECONDARY_H, SECONDARY_P),
-                 ("🃏  덱 구성", lambda: self.show("deck"), TEAL, "#3ED9CA", TEAL_DARK),
+                 ("🃏  덱 구성", lambda: self.open_deck("menu"), TEAL, "#3ED9CA", TEAL_DARK),
                  ("📖  규칙 보기", self.show_rules, "#E07B2A", "#F09040", "#C06010"),
                  ("🚪  종료", self.root.destroy, "#C9A876", "#D9BA8C", "#B5905F")]
         for t, cmd, a, b, d in items:
@@ -785,10 +1286,13 @@ class App:
             "• 설치 중에는 'N턴 뒤 발동'이나 '설치가 N장 이상일 때만 발동'하는 카드가 있어요\n"
             "• 확률 카드는 결과가 무작위예요 (방장 컴퓨터가 굴려요)\n"
             "• 방어로는 피해를 1 아래로 줄일 수 없어요 (보호막은 전부 막아요)\n"
-            "• 등급: 일반(수치 1, 단독 효과 · 개미 떼만 같은 카드를 모으면 강해짐) / 레어(2~3, 쓸만한 특수) /\n"
-            "  영웅(3, 강하지만 리스크) / 레전드(각각 다른 독특한 효과)\n\n"
+            "• 등급: 일반(피해 1~2, 단독 효과) / 레어(2~4, 쓸만한 특수) /\n"
+            "  영웅(3~5, 강하지만 리스크) / 레전드(각각 다른 독특한 효과)\n\n"
             "• 공격 카드를 쓰면 검은 아레나가 열려요. 공격하는 쪽은 카드마다 다른 방식으로 마우스 조종,\n"
             "  맞는 쪽은 WASD / 방향키로 피해요. 맞은 만큼만 피해가 들어가요 (한글 입력 상태에서도 돼요)\n"
+            "• 공격 방식은 카드마다 달라요: 위에서 쏟아지는 화살비·불비, 방패로 막기, 부채꼴 화염, 레이저, 칼날 달린 공 조종,\n"
+            "  서로 칼싸움(지면 반격 피해!), 블랙홀, 차원문 순간이동, 심판 격자, 치유 의식(방해받으면 줄어요),\n"
+            "  초록 구슬(상대가 회복), 조작 반전·얼음판·시야 제한 같은 변형까지. 카드 확대(🔍)에서 자세히 볼 수 있어요\n"
             "• 상자 고르기 같은 확률 카드는 맞는 쪽이 직접 골라요 (안전하면 회복, 위험하면 피해)\n"
             "• 방어 설치(방벽)는 받는 피해를 N까지 막고, 다 막거나 지속 턴이 지나면 사라져요\n"
             "• 필드 전용 카드는 아레나에서만 효과가 있어요 (피할 때 속도 증가 등)\n\n"
@@ -799,8 +1303,9 @@ class App:
     def build_deck(self):
         f, c = self.make_screen("deck")
         bar = panel(c, 20, 16, 1260, 72, r=20, pad=12)
-        RBtn(bar, "← 메뉴", lambda: self.show("menu"), w=100, h=42, fc=SECONDARY, hc=SECONDARY_H,
-             pc=SECONDARY_P).pack(side="left", padx=(0, 14))
+        self.deck_back_btn = RBtn(bar, "← 메뉴", lambda: self.show(self.deck_back), w=110, h=42, fc=SECONDARY,
+                                  hc=SECONDARY_H, pc=SECONDARY_P)
+        self.deck_back_btn.pack(side="left", padx=(0, 14))
         tk.Label(bar, text="🃏 덱 구성", font=(FONT, 18, "bold"), bg=CARD_BG, fg=TEXT_DARK).pack(side="left")
         self.deck_total = tk.Label(bar, font=(FONT, 13, "bold"), bg=CARD_BG)
         self.deck_total.pack(side="left", padx=18)
@@ -890,87 +1395,214 @@ class App:
         c.create_text(W / 2, 42, text="🌐 온라인 대전", font=(FONT, 26, "bold"), fill=TEXT_DARK)
         p = panel(c, W / 2 - 300, 76, 600, 560, r=26, pad=22)
         lab = dict(bg=CARD_BG, fg=TEXT_DARK)
-        muted = dict(font=(FONT, 10), bg=CARD_BG, fg=TEXT_MUTED)
+        muted = dict(font=(FONT, 10), bg=CARD_BG, fg=TEXT_MUTED, justify="left")
+        tk.Label(p, text="서버 주소", font=(FONT, 12, "bold"), **lab).pack(anchor="w")
+        self.server_entry = tk.Entry(p, width=30, font=(FONT, 12), bd=2, relief="solid")
+        self.server_entry.insert(0, load_server())
+        self.server_entry.pack(anchor="w", pady=(4, 2))
+        tk.Label(p, text="relay_server.py 를 켠 컴퓨터의 주소:포트 (친구와 같은 서버여야 해요. 한 번 적으면 저장돼요)", **muted).pack(anchor="w")
+        tk.Frame(p, bg=NEUTRAL_BD, height=2).pack(fill="x", pady=12)
         tk.Label(p, text="방 만들기", font=(FONT, 16, "bold"), **lab).pack(anchor="w")
-        tk.Label(p, text="내가 방장이 되면 방 코드가 나와요. 친구에게 코드를 알려 주세요.", **muted).pack(anchor="w")
-        row = tk.Frame(p, bg=CARD_BG)
-        row.pack(anchor="w", pady=10)
-        self.host_btn = RBtn(row, "방 만들기", self.toggle_host, w=130, h=40, fc=PRIMARY, hc=PRIMARY_H, pc=PRIMARY_P)
-        self.host_btn.pack(side="left")
-        self.copy_row = tk.Frame(row, bg=CARD_BG)          # 코드가 나오면 복사 버튼이 생겨요
-        self.codes = {}
-        tk.Frame(p, bg=NEUTRAL_BD, height=2).pack(fill="x", pady=10)
+        tk.Label(p, text="5자리 방 번호가 만들어져요. 번호를 친구에게 알려 주세요.", **muted).pack(anchor="w")
+        RBtn(p, "방 만들기", self.create_room, w=150, h=42, fc=PRIMARY, hc=PRIMARY_H, pc=PRIMARY_P).pack(anchor="w", pady=10)
+        tk.Frame(p, bg=NEUTRAL_BD, height=2).pack(fill="x", pady=6)
         tk.Label(p, text="방 참가", font=(FONT, 16, "bold"), **lab).pack(anchor="w")
-        tk.Label(p, text="방장이 알려 준 방 코드를 입력하세요.", **muted).pack(anchor="w")
+        tk.Label(p, text="친구가 알려 준 5자리 방 번호를 입력하세요.", **muted).pack(anchor="w")
         row2 = tk.Frame(p, bg=CARD_BG)
         row2.pack(anchor="w", pady=10)
-        self.join_code = tk.Entry(row2, width=17, font=(FONT, 15, "bold"), bd=2, relief="solid", justify="center")
+        ok5 = self.root.register(lambda v: v == "" or (v.isdigit() and len(v) <= 5))
+        self.join_code = tk.Entry(row2, width=7, font=(FONT, 22, "bold"), bd=2, relief="solid", justify="center",
+                                  validate="key", validatecommand=(ok5, "%P"))
         self.join_code.pack(side="left", padx=(0, 10))
         self.join_code.bind("<Return>", lambda e: self.start_join())
-        RBtn(row2, "참가", self.start_join, w=90, h=40, fc=SECONDARY, hc=SECONDARY_H, pc=SECONDARY_P).pack(side="left")
+        RBtn(row2, "참가", self.start_join, w=90, h=44, fc=SECONDARY, hc=SECONDARY_H, pc=SECONDARY_P).pack(side="left")
         self.on_status = tk.Label(p, text="", font=(FONT, 11), bg=NEUTRAL_BG, fg=TEXT_DARK, wraplength=520,
                                   justify="left", padx=12, pady=12)
-        self.on_status.pack(fill="x", pady=(12, 8))
-        tk.Label(p, text="같은 와이파이/LAN이면 '와이파이 코드'로 바로 돼요.\n인터넷으로 하려면 방장 공유기에서 포트 포워딩을 한 뒤 '인터넷 코드'를 쓰세요.",
-                 justify="left", **muted).pack(anchor="w")
-        RBtn(p, "← 메뉴", self.leave, w=110, h=40, fc="#C9A876", hc="#D9BA8C", pc="#B5905F").pack(anchor="w", pady=(12, 0))
-
-    def add_code(self, key, label, code):
-        """방 코드를 저장하고 복사 버튼을 보여 줘요"""
-        self.codes[key] = code
-        self.copy_row.pack(side="left", padx=(10, 0))
-        RBtn(self.copy_row, f"📋 {label}", lambda: self.copy_code(code), w=140, h=40, fc=TEAL, hc="#4FD3C6", pc=TEAL_DARK
-             ).pack(side="left", padx=(0, 6))
-
-    def copy_code(self, code):
-        self.root.clipboard_clear()
-        self.root.clipboard_append(code)
-        self.set_online_status(self.on_status.cget("text") + f"\n(복사했어요: {code})")
-
-    def reset_host(self, msg=None, bad=False):
-        """방 만들기 버튼/코드/안내를 처음 상태로"""
-        self.host_btn.set_text("방 만들기")
-        self.clear_codes()
-        if msg is not None:
-            self.set_online_status(msg, bad)
-
-    def clear_codes(self):
-        self.codes = {}
-        for w in self.copy_row.winfo_children():
-            w.destroy()
-        self.copy_row.pack_forget()
+        self.on_status.pack(fill="x", pady=(10, 8))
+        RBtn(p, "← 메뉴", self.leave, w=110, h=40, fc="#C9A876", hc="#D9BA8C", pc="#B5905F").pack(anchor="w", pady=(6, 0))
 
     def set_online_status(self, text, bad=False):
         self.on_status.config(text=text, bg=FAIL_BG if bad else NEUTRAL_BG)
 
-    def toggle_host(self):
-        if self.net and self.net.role == "host" and not self.g:   # 대기 중 → 취소
-            self.net.close()
-            self.net = None
-            self.reset_host("방을 닫았어요.")
-            return
-        if not self.deck_ok():
-            return
-        self.leave_net()
-        self.clear_codes()
-        self.net = Net()
-        self.net.host()
-        self.host_btn.set_text("취소")
-        self.set_online_status("방을 여는 중…")
-
-    def start_join(self):
-        if not self.deck_ok():
-            return
+    def server_addr(self):
         try:
-            ip, port = parse_code(self.join_code.get())
+            srv = parse_server(self.server_entry.get())
         except ValueError as e:
             self.set_online_status(str(e), True)
+            return None
+        save_server(self.server_entry.get().strip())
+        return srv
+
+    def create_room(self):
+        srv = self.server_addr()
+        if srv:
+            self.leave_net()
+            self.net = Net()
+            self.net.create(srv)
+            self.set_online_status("서버에 연결하는 중…")
+
+    def start_join(self):
+        code = self.join_code.get().strip()
+        if not (len(code) == 5 and code.isdigit()):
+            self.set_online_status("방 번호는 5자리 숫자예요 (예: 73945)", True)
             return
-        self.leave_net()
-        self.reset_host()
-        self.net = Net()
-        self.net.join(ip, port, self.deck)
-        self.set_online_status("접속하는 중…")
+        srv = self.server_addr()
+        if srv:
+            self.leave_net()
+            self.net = Net()
+            self.room_code = code
+            self.net.join(srv, code)
+            self.set_online_status("방에 들어가는 중…")
+
+    # ── 대기실: 서로 덱을 확인·변경하고 둘 다 '준비완료'를 누르면 시작 ──
+    def build_lobby(self):
+        f, c = self.make_screen("lobby")
+        c.create_text(W / 2, 38, text="🎮 대기실", font=(FONT, 28, "bold"), fill=TEXT_DARK)
+        top = panel(c, W / 2 - 380, 66, 760, 118, r=24, pad=14)
+        row = tk.Frame(top, bg=CARD_BG)
+        row.pack(expand=True)
+        tk.Label(row, text="방 번호", font=(FONT, 12, "bold"), bg=CARD_BG, fg=TEXT_MUTED).pack(side="left", padx=(0, 14))
+        self.lb_code = tk.Label(row, text="-----", font=(FONT, 46, "bold"), bg=CARD_BG, fg=PRIMARY)
+        self.lb_code.pack(side="left")
+        RBtn(row, "📋 복사", self.copy_room_code, w=100, h=40, fc=TEAL, hc="#3ED9CA", pc=TEAL_DARK).pack(side="left", padx=(16, 0))
+        self.lb = {}
+        for who, x in (("me", W / 2 - 380), ("op", W / 2 + 10)):
+            pn = panel(c, x, 200, 370, 270, r=22, pad=16)
+            w = {"title": tk.Label(pn, font=(FONT, 16, "bold"), bg=CARD_BG, fg=TEXT_DARK)}
+            w["title"].pack(anchor="w")
+            w["chip"] = tk.Label(pn, font=(FONT, 12, "bold"), padx=14, pady=6)
+            w["chip"].pack(anchor="w", pady=(10, 6))
+            w["deck"] = tk.Label(pn, font=(FONT, 11), bg=CARD_BG, justify="left", wraplength=330)
+            w["deck"].pack(anchor="w")
+            if who == "me":
+                bt = tk.Frame(pn, bg=CARD_BG)
+                bt.pack(anchor="w", pady=(18, 0))
+                RBtn(bt, "🃏 덱 편집", self.lobby_edit_deck, w=130, h=46, fc=TEAL, hc="#3ED9CA", pc=TEAL_DARK).pack(side="left")
+                w["ready"] = RBtn(bt, "준비완료", self.toggle_ready, w=150, h=46, fc=PRIMARY, hc=PRIMARY_H, pc=PRIMARY_P,
+                                  font=(FONT, 12, "bold"))
+                w["ready"].pack(side="left", padx=(10, 0))
+            self.lb[who] = w
+        bot = panel(c, W / 2 - 380, 486, 760, 130, r=22, pad=14)
+        self.lb_msg = tk.Label(bot, font=(FONT, 12, "bold"), bg=CARD_BG, fg=TEXT_DARK, wraplength=700)
+        self.lb_msg.pack(pady=(2, 10))
+        RBtn(bot, "나가기", self.leave, w=110, h=40, fc="#C9A876", hc="#D9BA8C", pc="#B5905F").pack()
+
+    def copy_room_code(self):
+        self.root.clipboard_clear()
+        self.root.clipboard_append(self.room_code)
+        self.lb_msg.config(text=f"방 번호 {self.room_code} 를 복사했어요", fg=SUCCESS_TXT)
+
+    def lobby_edit_deck(self):
+        self.my_ready = False                   # 덱을 고치는 동안은 준비 해제
+        self.send_lob()
+        self.open_deck("lobby")
+
+    def open_deck(self, back):
+        self.deck_back = back
+        self.show("deck")
+
+    def send_lob(self):
+        self.lob_deck = list(self.deck)
+        if self.net and self.net.role:
+            self.net.send({"t": "lob", "deck": self.deck, "ready": self.my_ready})
+
+    def lobby_sync(self):
+        """대기실이 열릴 때: 덱이 바뀌었으면 준비 해제, 내 상태를 상대에게 알려요"""
+        if self.lob_deck is not None and list(self.deck) != self.lob_deck:
+            self.my_ready = False
+        self.send_lob()
+        self.lobby_refresh()
+
+    def lobby_refresh(self):
+        me, op = self.lb["me"], self.lb["op"]
+        host = bool(self.net and self.net.role == "host")
+        self.lb_code.config(text=self.room_code or "-----")
+        chip_ok = dict(bg="#D9F5E3", fg=SUCCESS_TXT)
+        chip_no = dict(bg=NEUTRAL_BG, fg=TEXT_MUTED)
+        err = validate_deck(self.deck)
+        me["title"].config(text=f"👤 나 ({'방장' if host else '참가자'})")
+        me["chip"].config(text="✅ 준비완료" if self.my_ready else "⏳ 준비 중", **(chip_ok if self.my_ready else chip_no))
+        me["deck"].config(text=f"덱 {len(self.deck)}장 ✔" if not err else f"덱 {len(self.deck)}장 — {err}",
+                          fg=SUCCESS_TXT if not err else FAIL_TXT)
+        me["ready"].set_text("준비 취소" if self.my_ready else "준비완료")
+        op["title"].config(text=f"👤 상대 ({'참가자' if host else '방장'})")
+        if not self.opp_here:
+            op["chip"].config(text="⌛ 기다리는 중", **chip_no)
+            op["deck"].config(text="상대가 들어오면 여기에 표시돼요", fg=TEXT_MUTED)
+            msg, bad = "친구에게 방 번호를 알려 주세요" if host else "연결 중…", False
+        else:
+            op["chip"].config(text="✅ 준비완료" if self.opp_ready else "⏳ 준비 중", **(chip_ok if self.opp_ready else chip_no))
+            if self.opp_err:
+                op["deck"].config(text=f"덱이 올바르지 않아요: {self.opp_err}", fg=FAIL_TXT)
+            elif self.opp_deck is None:
+                op["deck"].config(text="덱 정보를 받는 중…", fg=TEXT_MUTED)
+            else:
+                op["deck"].config(text=f"덱 {len(self.opp_deck or [])}장 ✔", fg=SUCCESS_TXT)
+            if self.my_ready and self.opp_ready:
+                msg, bad = "둘 다 준비완료! 곧 시작해요…", False
+            elif self.my_ready:
+                msg, bad = "상대가 준비하기를 기다리는 중…", False
+            else:
+                msg, bad = "덱을 확인하고 '준비완료'를 누르세요. 둘 다 누르면 시작해요", False
+        self.lb_msg.config(text=msg, fg=FAIL_TXT if bad else TEXT_DARK)
+
+    def toggle_ready(self):
+        if not self.my_ready:
+            err = validate_deck(self.deck)
+            if err:
+                self.lb_msg.config(text=f"덱을 먼저 고쳐 주세요: {err}", fg=FAIL_TXT)
+                return
+            if not self.opp_here:
+                self.lb_msg.config(text="상대가 들어온 뒤에 준비할 수 있어요", fg=FAIL_TXT)
+                return
+        self.my_ready = not self.my_ready
+        self.send_lob()
+        self.lobby_refresh()
+        self.try_start()
+
+    def try_start(self):
+        """(방장) 둘 다 준비되면 게임 시작"""
+        if (self.net and self.net.role == "host" and not self.g and self.my_ready and self.opp_ready
+                and self.opp_deck and not validate_deck(self.deck)):
+            self.reset_game_state()
+            self.mode = "host"
+            self.guest_arena = True
+            self.g = Game(self.deck, self.opp_deck)
+            self.net.ready = True
+            self.my_ready = self.opp_ready = False
+            self.show("battle")
+            self.after_change()
+
+    def handle_lob(self, m):
+        if self.mode in ("host", "guest"):
+            if self.view and self.view["o"]:                 # 끝난 게임 화면이면 상대와 함께 대기실로
+                self.back_to_lobby()
+            else:
+                return                                        # 진행 중에는 무시
+        err = validate_deck(m.get("deck"))
+        self.opp_here = True
+        self.opp_deck = None if err else list(m["deck"])
+        self.opp_err = err
+        self.opp_ready = bool(m.get("ready")) and not err
+        self.lobby_refresh()
+        self.try_start()
+
+    def back_to_lobby(self):
+        """게임이 끝난 뒤 같은 상대와 다시 하려고 대기실로"""
+        if not self.net:
+            return self.leave()
+        self.reset_game_state()
+        self.net.ready = False
+        self.over_f.place_forget()
+        self.my_ready = self.opp_ready = False
+        self.show("lobby")
+
+    def reset_online(self, msg="", bad=False):
+        self.set_online_status(msg, bad)
+
+    def reset_lobby_state(self):
+        self.room_code, self.my_ready, self.opp_ready, self.opp_here = "", False, False, False
+        self.opp_deck, self.opp_err, self.lob_deck = None, None, None
 
     def leave_net(self):
         if self.net:
@@ -1051,6 +1683,7 @@ class App:
         ob.pack(pady=22)
         self.again_btn = RBtn(ob, "다시 하기", self.start_ai, w=130, h=44, fc=PRIMARY, hc=PRIMARY_H, pc=PRIMARY_P)
         self.again_btn.pack(side="left", padx=6)
+        self.lobby_btn = RBtn(ob, "대기실로", self.back_to_lobby, w=130, h=44, fc=TEAL, hc="#3ED9CA", pc=TEAL_DARK)
         self.over_menu_btn = RBtn(ob, "메뉴로", self.leave, w=130, h=44, fc=SECONDARY, hc=SECONDARY_H, pc=SECONDARY_P)
         self.over_menu_btn.pack(side="left", padx=6)
 
@@ -1159,11 +1792,12 @@ class App:
                                    fg=SUCCESS_TXT if v["w"] == 1 else FAIL_TXT if v["w"] == 0 else TEXT_DARK)
             self.over_sub.config(text="상대의 체력을 모두 깎았어요." if v["w"] == 1 else
                                  "체력이 0이 되었어요." if v["w"] == 0 else "둘 다 쓰러졌어요.")
+            self.again_btn.pack_forget()
+            self.lobby_btn.pack_forget()
             if self.mode == "ai":
-                self.again_btn.pack_forget()
                 self.again_btn.pack(side="left", padx=6, before=self.over_menu_btn)
-            else:
-                self.again_btn.pack_forget()
+            elif self.net:
+                self.lobby_btn.pack(side="left", padx=6, before=self.over_menu_btn)
             self.over_f.place(relx=0.5, rely=0.45, anchor="center")
             self.over_f.lift()
         else:
@@ -1435,6 +2069,8 @@ class App:
                 return n
         if len(k) == 1 and k in "123456789":
             return k
+        if k == "space":
+            return "space"
         return None
 
     def on_key_down(self, e):
@@ -1444,6 +2080,9 @@ class App:
         job = self.key_jobs.pop(n, None)
         if job:
             self.root.after_cancel(job)
+        if n == "space":
+            self.click_count += 1                                  # 스페이스 = 클릭 (칼싸움 베기 등)
+            return
         self.keys.add(n)
         if n.isdigit():
             self.arena_pick(int(n) - 1)
@@ -1500,7 +2139,7 @@ class App:
 
     def build_arena_ui(self, pd_cid, me_att, spec, mods):
         c = CARDS[pd_cid]
-        title, att_txt, def_txt = AR.HELP[spec["mode"]]
+        title, att_txt, def_txt = AR.help_for(spec)
         f = tk.Frame(self.root, bg=ARENA_BG)
         f.place(x=0, y=0, relwidth=1, relheight=1)
         f.lift()
@@ -1518,9 +2157,7 @@ class App:
                  anchor="w").pack(fill="x", pady=(0, 8))
         tk.Label(left, text=att_txt if me_att else def_txt, font=(FONT, 12), bg=ARENA_BG, fg="#E6E6F0",
                  wraplength=300, justify="left", anchor="w").pack(fill="x")
-        tk.Label(left, text="🖱 마우스: 조준·위치 / 클릭: 발사·확정" if me_att and spec["mode"] != "pick" else
-                 ("🖱 마우스 클릭 또는 숫자키(1~)로 상자 고르기" if (not me_att and spec["mode"] == "pick") else
-                  ("⌨ WASD / 방향키: 이동" if not me_att else "구경 중…")),
+        tk.Label(left, text=AR.ctrl_for(spec, me_att),
                  font=(FONT, 11, "bold"), bg=ARENA_BG, fg="#9AA0B5", wraplength=300, justify="left",
                  anchor="w").pack(fill="x", pady=(14, 0))
         eff = []
@@ -1534,6 +2171,10 @@ class App:
             eff.append(f"🕸 피하는 쪽 이동속도 -{round(mods['foe_slow'] * 100)}%")
         if mods.get("proj_slow"):
             eff.append(f"🌀 공격 속도 -{round(mods['proj_slow'] * 100)}%")
+        if spec.get("twist"):
+            eff.append(AR.TWIST_TXT.get(spec["twist"], "") + (f" ({spec['tw_at']:g}초 뒤부터)" if spec.get("tw_at") else ""))
+        if spec.get("fog"):
+            eff.append("🌑 어둠: 피하는 쪽 주변만 보여요")
         if eff:
             tk.Label(left, text="필드 효과", font=(FONT, 10, "bold"), bg=ARENA_BG, fg="#FFD166", anchor="w"
                      ).pack(fill="x", pady=(18, 2))
@@ -1629,10 +2270,20 @@ class App:
             if ar["remote"] and r:
                 k = r.get("k", [0, 0])
                 sim.set_def_input(k[0], k[1])
+                m = r.get("m", [AR.SIZE / 2, AR.SIZE / 3])
+                sim.set_def_aim(m[0], m[1])                       # 방패 방향 등
+                c = int(r.get("c", 0))
+                for _ in range(max(0, c - ar["rc"])):
+                    sim.def_click()
+                ar["rc"] = max(ar["rc"], c)
                 if r.get("p") is not None:
                     sim.pick(int(r["p"]))
         else:
             sim.set_def_input(*self.move_vec())
+            sim.set_def_aim(*self.mouse)
+            for _ in range(max(0, self.click_count - ar["lc"])):
+                sim.def_click()
+            ar["lc"] = self.click_count
             if ar["remote"] and r:
                 m = r.get("m", [AR.SIZE / 2, AR.SIZE / 3])
                 sim.set_aim(m[0], m[1])
@@ -1642,7 +2293,7 @@ class App:
                 ar["rc"] = max(ar["rc"], c)
 
     def _arena_sounds(self, evs):
-        names = {"fire": "play", "hit": "hit", "boom": "hit", "heal": "heal"}
+        names = {"fire": "play", "hit": "hit", "boom": "hit", "heal": "heal", "block": "play", "break": "hit", "warp": "turn_opp"}
         seen = set()
         for e in evs:
             n = names.get(e)
@@ -1768,8 +2419,10 @@ class App:
             view = dict(snap)
             if ar["me_att"]:
                 view["aim"] = [self.mouse[0], self.mouse[1]]               # 내 조준은 내 마우스 그대로
-            elif ar["spec"]["mode"] != "pick":
-                view["d"] = self._predict(ar, snap)
+            else:
+                view["da"] = [self.mouse[0], self.mouse[1]]
+                if ar["spec"]["mode"] != "pick" and not snap.get("np"):
+                    view["d"] = self._predict(ar, snap)
         ar["rend"].hover = self.mouse
         ar["rend"].update(view, ar, now)
 
@@ -1801,7 +2454,8 @@ class App:
     def leave(self):
         self.leave_net()
         self.reset_game_state()
-        self.reset_host("")
+        self.reset_lobby_state()
+        self.reset_online("")
         self.over_f.place_forget()
         self.show("menu")
 
@@ -1815,52 +2469,53 @@ class App:
                     break
                 self.on_net(ev)
         finally:
-            self.root.after(80, self.poll)
+            self.root.after(15, self.poll)
 
     def on_net(self, ev):
         kind = ev[0]
         net = self.net
-        if kind == "listening":
-            self.add_code("lan", "와이파이 코드", ev[1])
-            self.set_online_status(f"방이 열렸어요! 친구에게 방 코드를 알려 주세요.\n와이파이 코드: {ev[1]}\n(상대가 들어오면 자동으로 시작해요)")
-        elif kind == "public":
-            self.add_code("net", "인터넷 코드", ev[1])
-            self.set_online_status(self.on_status.cget("text") + f"\n인터넷 코드: {ev[1]}  (포트 포워딩 필요)")
-        elif kind == "connected":
-            self.set_online_status(f"{ev[1]} 접속! 덱을 확인하는 중…")
+        if kind == "room":                                    # (방장) 방이 만들어짐 → 대기실
+            self.reset_lobby_state()
+            self.room_code = ev[1]
+            self.show("lobby")
+            self.lobby_sync()
+        elif kind == "paired":                                # 두 사람이 이어짐
+            self.opp_here = True
+            self.show("lobby")
+            self.lobby_sync()
         elif kind == "error":
             self.leave_net()
-            self.reset_host(ev[1], True)
-        elif kind == "disc":
+            self.reset_game_state()
+            self.reset_lobby_state()
+            self.show("online")
+            self.reset_online(ev[1], True)
+        elif kind in ("disc", "left"):
             if self.view and not self.view["o"]:
                 messagebox.showinfo("연결 끊김", "상대와 연결이 끊어졌어요.")
                 self.leave()
-            elif not self.view:
+            elif self.view and self.view["o"]:                # 끝난 화면에서 상대가 나감
                 self.leave_net()
-                self.reset_host("연결이 끊어졌어요.", True)
+                self.over_sub.config(text="상대가 나갔어요.")
+                self.lobby_btn.pack_forget()
+            else:
+                self.leave_net()
+                self.reset_lobby_state()
+                self.show("online")
+                self.reset_online("상대와 연결이 끊어져서 방이 닫혔어요." if kind == "left" or self.current == "lobby"
+                                  else "연결이 끊어졌어요.", True)
         elif kind == "msg":
             m = ev[1]
-            if net.role == "host":
+            if m.get("t") == "lob":
+                self.handle_lob(m)
+            elif net.role == "host":
                 self.host_msg(m)
             else:
                 self.guest_msg(m)
 
     def host_msg(self, m):
-        if not self.g:   # 첫 메시지 = hello
-            err = validate_hello(m)
-            if err:
-                self.net.send({"t": "err", "msg": err})
-                self.leave_net()
-                self.reset_host(f"상대 덱이 올바르지 않아요: {err}", True)
-                return
-            self.reset_game_state()
-            self.mode = "host"
-            self.guest_arena = bool(m.get("arena"))
-            self.g = Game(self.deck, m["deck"])
-            self.net.ready = True
-            self.show("battle")
-            self.after_change()
-        elif m.get("t") == "ai":           # 상대의 아레나 입력
+        if not self.g:
+            return
+        if m.get("t") == "ai":                 # 상대의 아레나 입력
             self.remote_in = m
         else:
             ok, msg = self.g.act(1, m)
@@ -1870,8 +2525,7 @@ class App:
 
     def guest_msg(self, m):
         if m.get("t") == "err":
-            self.set_online_status(f"거절됨: {m.get('msg')}", True)
-            self.leave_net()
+            self.set_msg(f"거절됨: {m.get('msg')}")
             return
         if m.get("t") == "as" and self.ar and self.ar["kind"] == "guest":      # 아레나 화면 데이터
             self.ar["snap"] = m["s"]
@@ -1883,8 +2537,11 @@ class App:
             return
         first = self.mode != "guest"
         if first:
+            if m["v"].get("o"):                # 대기실로 돌아온 뒤 늦게 도착한 옛 상태는 무시
+                return
             self.reset_game_state()
             self.mode = "guest"
+            self.my_ready = self.opp_ready = False
             self.show("battle")
         self.apply_view(m["v"])
         pd = m["v"].get("pd")
