@@ -34,7 +34,7 @@ from tkinter import ttk, messagebox
 import arena as AR
 from cardgame import (CARDS, CFG, RN, KN, RORDER, Game, ai_choose,
                       auto_deck, describe, load_deck, save_deck, validate_deck,
-                      rarity_counts, LIMIT, card_notes)
+                      rarity_counts, LIMIT, card_notes, rules_text)
 
 # ─── 색상 팔레트 ────────────────────────────────────────
 BG_TOP, BG_BOTTOM = "#FFD58A", "#FFF6E5"
@@ -53,6 +53,11 @@ ARENA_BG = "#0B0B10"
 AI_SKILL = 0.55              # AI가 조종할 때의 실력 (0~1)
 ARENA_INTRO = 2.6            # 아레나 시작 전 안내 시간(초)
 HANGUL_KEYS = {"ㅈ": "w", "ㅁ": "a", "ㄴ": "s", "ㅇ": "d"}   # 한글 입력 상태에서도 WASD가 먹히게
+# 투사체 이모지 → 몸통 색. 이모지는 폰트/배경에 따라 안 보일 수 있어서, 몸통(색깔 도형)을 꼭 같이 그려요
+GCOL = {"arrow": "#F2E2B0", "🔥": "#FF8A3D", "☄": "#FF8A3D", "⚡": "#FFE14D", "❄": "#9FE3FF", "🪨": "#A8A090", "🐝": "#F5C842",
+        "🐜": "#E0803A", "🕷": "#B0A0C8", "💀": "#FF5C5C", "🍎": "#FF5C5C", "🗡": "#D0D8E8", "🪓": "#D0D8E8", "⚔": "#D0D8E8",
+        "🪚": "#D0D8E8", "💨": "#BFD9FF", "🦇": "#B070FF", "🐍": "#5ADB7A", "💰": "#FFD166", "☠": "#9BE59D", "💣": "#FF8A3D",
+        "💥": "#FFB020", "🖐": "#FFD0A0", "🪞": "#BFEFFF", "🎲": "#F5F5F5"}
 MODE_ICON = {"shoot": "🎯", "swarm": "🐜", "zone": "🔥", "chase": "🗡", "bounce": "🎲", "pick": "🎁", "rain": "🏹",
              "orbit": "🌪", "duel": "⚔", "shield": "🛡", "cone": "🔥", "gamble": "💚", "channel": "✚", "knock": "💨",
              "vortex": "🌀", "warp": "🚪", "beam": "⚡", "grid": "⚖"}
@@ -80,8 +85,7 @@ def vgrad(canvas, x1, y1, x2, y2, c1, c2, steps=80):
         t = i / steps
         col = "#%02x%02x%02x" % (int(r1 + (r2 - r1) * t) >> 8, int(g1 + (g2 - g1) * t) >> 8,
                                  int(b1 + (b2 - b1) * t) >> 8)
-        canvas.create_rectangle(x1, y1 + h * i / steps, x2, y1 + h * (i + 1) / steps + 1,
-                                fill=col, outline=col)
+        canvas.create_rectangle(x1, y1 + h * i / steps, x2, y1 + h * (i + 1) / steps + 1, fill=col, outline=col)
 
 
 def panel(canvas, x, y, w, h, r=20, pad=14, bg=CARD_BG):
@@ -115,13 +119,16 @@ def glyph(c):
 
 
 # ─── 커스텀 위젯 ─────────────────────────────────────────
+THEMES = {"primary": (PRIMARY, PRIMARY_H, PRIMARY_P), "blue": (SECONDARY, SECONDARY_H, SECONDARY_P),
+          "teal": (TEAL, "#3ED9CA", TEAL_DARK), "tan": ("#C9A876", "#D9BA8C", "#B5905F"), "gray": ("#8A9BB8", "#9EAECA", "#6F82A3")}
+
+
 class RBtn(tk.Canvas):
-    def __init__(self, parent, text, cmd=None, w=120, h=40, r=14, bg=CARD_BG, fc=PRIMARY,
-                 hc=PRIMARY_H, pc=PRIMARY_P, tc="#FFF", font=(FONT, 10, "bold")):
+    def __init__(self, parent, text, cmd=None, w=120, h=40, r=14, bg=CARD_BG, theme="primary", tc="#FFF", font=(FONT, 10, "bold")):
         super().__init__(parent, width=w, height=h, bg=bg, highlightthickness=0)
+        fc, hc, pc = THEMES[theme] if isinstance(theme, str) else theme
         self.cmd, self.w, self.h, self.fc, self.hc, self.pc, self.tc = cmd, w, h, fc, hc, pc, tc
-        self.on = True
-        self._sh = self.create_polygon(rrp(2, 2, w - 2, h - 2, r), smooth=True, fill=fc, outline="")
+        self.on, self._sh = True, self.create_polygon(rrp(2, 2, w - 2, h - 2, r), smooth=True, fill=fc, outline="")
         self._tx = self.create_text(w / 2, h / 2, text=text, fill=tc, font=font)
         self.bind("<Enter>", lambda e: self.on and (self.itemconfig(self._sh, fill=self.hc), self.config(cursor="hand2")))
         self.bind("<Leave>", lambda e: self.on and self.itemconfig(self._sh, fill=self.fc))
@@ -196,8 +203,7 @@ class CardView(tk.Canvas):
         dfs = 8.5 if len(desc) <= 34 else 7.5 if len(desc) <= 52 else 7
         self.create_text(11, ay + ah + 5, anchor="nw", text=desc, width=w - 26,
                          font=(FONT, max(6, int(dfs * s))), fill=PAPER_INK)
-        self.create_text(w - 13, h - 15, anchor="e", text=RN[c["rarity"]],
-                         font=(FONT, max(7, int(8 * s)), "bold"), fill=rc)
+        self.create_text(w - 13, h - 15, anchor="e", text=RN[c["rarity"]], font=(FONT, max(7, int(8 * s)), "bold"), fill=rc)
         if cmd:
             self.bind("<Button-1>", lambda e: cmd())
             self.config(cursor="hand2")
@@ -215,8 +221,7 @@ def field_chip(parent, cid, left, on_click=None, hp=None):
                  + (f"  🛡 {hp}/{c.get('barrier', hp)}" if hp else ""),
                  font=(FONT, 9, "bold"), bg=PAPER, fg=PAPER_INK)
     a.pack(anchor="w", padx=6, pady=(3, 0))
-    b = tk.Label(f, text=describe(c), font=(FONT, 8), bg=PAPER, fg=TEXT_MUTED, wraplength=215,
-                 justify="left")
+    b = tk.Label(f, text=describe(c), font=(FONT, 8), bg=PAPER, fg=TEXT_MUTED, wraplength=215, justify="left")
     b.pack(anchor="w", padx=6, pady=(0, 3))
     if on_click:                      # 클릭하면 카드 확대
         for w in (f, a, b):
@@ -265,10 +270,7 @@ class Net:
       room(번호) / paired(역할) / msg(게임 메시지) / left(상대 퇴장) / error(문구) / disc(연결 끊김)"""
 
     def __init__(self):
-        self.q = queue.Queue()
-        self.sock = None
-        self.closed = False
-        self.role = None
+        self.q, self.sock, self.closed, self.role = queue.Queue(), None, False, None
         self.ready = False          # (방장) 게임이 시작돼서 상태를 보내도 되는지
 
     def _reader(self, sock):
@@ -454,6 +456,7 @@ class ArenaRenderer:
         self.impl = "shoot" if self.mode in AR.SHOOTLIKE else self.mode
         self.cache, self.pools, self.flash = {}, {}, False
         self.g, self.gs, self.fog_r = spec.get("g"), spec.get("gs", 16), spec.get("fog", 0)
+        self.pcol = spec.get("col") or GCOL.get(self.g) or ("#38D66B" if self.mode == "swarm" else "#E8D9B0")
         self.dpos = (0.0, 0.0)
         S = self.S
         for i in range(1, 6):                                   # 바닥 격자 (정적)
@@ -537,30 +540,30 @@ class ArenaRenderer:
         return g
 
     # ── 투사체 그림 (화살 / 글자 / 동그라미) ──
-    def mk_proj(self, color="#E8D9B0", size=None, outline="#FFFFFF"):
+    def mk_proj(self, color=None, size=None):
+        """투사체 하나 = (색깔 몸통, 이모지 글자). 몸통은 항상 보이고, 이모지는 그 위에 흰색으로 얹어요"""
         cv, g = self.cv, self.g
+        col = color or self.pcol
         if g == "arrow":
-            return self._low(cv.create_line(0, 0, 0, 0, fill=color, width=3, arrow="last", arrowshape=(11, 13, 5)))
-        if g:
-            return self._low(cv.create_text(0, 0, text=g, font=(FONT, int(size or self.gs))))
-        return self._low(cv.create_oval(0, 0, 0, 0, fill=color, outline=outline))
-
-    def put_proj(self, it, x, y, r, ang=math.pi / 2, color=None, text=None):
-        g = self.g
-        if g == "arrow":
-            L = max(14, r * 2.6)
-            c, s = math.cos(ang) * L / 2, math.sin(ang) * L / 2
-            self.xy(it, x - c, y - s, x + c, y + s)
-            if color:
-                self.cfg(it, fill=color)
-        elif g:
-            self.xy(it, x, y)
-            if text:
-                self.cfg(it, text=text)
+            body = cv.create_line(0, 0, 0, 0, fill=col, width=4, arrow="last", arrowshape=(13, 16, 6))
         else:
-            self.xy(it, x - r, y - r, x + r, y + r)
-            if color:
-                self.cfg(it, fill=color)
+            body = cv.create_oval(0, 0, 0, 0, fill=col, outline=mix(col, "#FFFFFF", 0.45), width=1)
+        lab = cv.create_text(0, 0, text="" if g == "arrow" else (g or ""), fill="#FFFFFF", font=(FONT, int(size or self.gs)))
+        return self._low((body, lab))
+
+    def put_proj(self, grp, x, y, r, ang=math.pi / 2, color=None, text=None):
+        body, lab = grp
+        if self.g == "arrow":
+            L = max(24, r * 3.2)
+            c, s = math.cos(ang) * L / 2, math.sin(ang) * L / 2
+            self.xy(body, x - c, y - s, x + c, y + s)
+        else:
+            self.xy(body, x - r, y - r, x + r, y + r)
+        if color:
+            self.cfg(body, fill=color)
+        self.xy(lab, x, y)
+        if text is not None:
+            self.cfg(lab, text=text)
 
     def aim_cross(self, a, b, ax, ay, size=7):
         self.xy(a, ax - size, ay, ax + size, ay)
@@ -626,8 +629,7 @@ class ArenaRenderer:
         if self.mode == "pick":
             return "안전한 상자! 🍀" if r.get("safe") else "위험한 상자! 💥"
         d, me, sd, sh, fh = r["dmg"], self.me_att, r.get("self", 0), r.get("sheal", 0), r.get("fheal", 0)
-        t = [(f"💥 {d} 피해를 입혔어요!" if d else "😤 못 맞혔어요…") if me else
-             (f"💢 {d} 피해를 입었어요!" if d else "😎 모두 피했어요!")]
+        t = [(f"💥 {d} 피해를 입혔어요!" if d else "😤 못 맞혔어요…") if me else (f"💢 {d} 피해를 입었어요!" if d else "😎 모두 피했어요!")]
         if sd:
             t.append(f"⚔ 반격당해 {sd} 피해를 입었어요!" if me else f"⚔ 반격 성공! 상대가 {sd} 피해!")
         if sh:
@@ -667,9 +669,8 @@ class ArenaRenderer:
             self.show(self.aim, False)
         br = s["br"]
         gamble, kinds = self.mode == "gamble", {0: "#FF5C5C", 1: "#38D66B", 2: "#B070FF"}
-        base = "#FF5C5C" if gamble else "#E8D9B0"
-        if gamble and not self.g:
-            kinds[0] = base
+        base = "#FF5C5C" if gamble else self.pcol
+        kinds[0] = base
         self.pool("b", s["b"], lambda: self.mk_proj(base),
                   lambda it, d: self.put_proj(it, d[0], d[1], br, d[3],
                                               kinds.get(d[2], base) if (d[2] or gamble) else None,
@@ -702,8 +703,7 @@ class ArenaRenderer:
         self.show(self.ring)
         self.aim_cross(self.cx1, self.cx2, ax, ay, 6)
         r = s["ar"]
-        self.pool("a", s["a"], lambda: self.mk_proj("#38D66B", 11, "#B8FFCB"),
-                  lambda it, d: self.put_proj(it, d[0], d[1], r))
+        self.pool("a", s["a"], lambda: self.mk_proj(None, 11), lambda it, d: self.put_proj(it, d[0], d[1], r))
         self.cfg(self.hud, text=f"남은 {s['left']}마리", fill="#38D66B")
 
     # ── zone ──
@@ -733,7 +733,7 @@ class ArenaRenderer:
             return self._low((cv.create_oval(0, 0, 0, 0, fill="#4A1212", outline="#FF3B3B", width=2),
                               cv.create_oval(0, 0, 0, 0, fill="#B81D1D", outline=""),
                               cv.create_oval(0, 0, 0, 0, outline="#FFD166", dash=(2, 3)),
-                              cv.create_text(0, 0, text=g or "", font=(FONT, 20))))
+                              cv.create_text(0, 0, text=g or "", font=(FONT, 20), fill="#FFFFFF")))
 
         def place(grp, z):
             x, y, r, st, t = z
@@ -776,26 +776,28 @@ class ArenaRenderer:
 
         def make():
             cv = self.cv
+            body, lab = self.mk_proj(None, 15)                                                          # 떨어지는 것
             return self._low((cv.create_oval(0, 0, 0, 0, outline="#FF3B3B", width=2, dash=(3, 3)),     # 착탄 표식
-                              self.mk_proj("#FFE08A", 15),                                             # 떨어지는 것
+                              body, lab,
                               cv.create_oval(0, 0, 0, 0, fill="#FFB020", outline="#FFFFFF"),            # 착탄 폭발
-                              cv.create_text(0, 0, text=g if g and g != "arrow" else "", font=(FONT, 18))))
+                              cv.create_text(0, 0, text=g if g and g != "arrow" else "", font=(FONT, 18), fill="#FFFFFF")))
 
         def place(grp, d):
             x, y, p, st = d
-            mark, proj, burst, fire = grp
+            mark, body, lab, burst, fire = grp
+            proj = (body, lab)
             if st == 0:
                 self.xy(mark, x - rr, y - rr, x + rr, y + rr)
                 px = x + slant * (y + 40) * (1 - p)
                 py = -40 + (y + 40) * p
-                self.put_proj(proj, px, py, 8, math.atan2(1.0, -slant))
-                self.show_all((mark, proj))
+                self.put_proj(proj, px, py, 9, math.atan2(1.0, -slant))
+                self.show_all((mark, body, lab))
                 self.show_all((burst, fire), False)
             else:
                 self.xy(burst, x - rr, y - rr, x + rr, y + rr)
                 self.cfg(burst, fill="#FFB020" if st == 1 else "#7A2E0E", outline="#FFFFFF" if st == 1 else "#FF8A3D")
                 self.show(burst)
-                self.show_all((mark, proj), False)
+                self.show_all((mark, body, lab), False)
                 if st == 2 and g and g != "arrow":
                     self.xy(fire, x, y)
                 self.show(fire, st == 2 and bool(g) and g != "arrow")
@@ -825,8 +827,8 @@ class ArenaRenderer:
             cv = self.cv
             return self._low((cv.create_polygon(0, 0, 0, 0, 0, 0, fill="#4A1212", outline="#FF3B3B", width=2),
                               cv.create_polygon(0, 0, 0, 0, 0, 0, fill="#B81D1D", outline=""),
-                              cv.create_text(0, 0, text=g, font=(FONT, 24)), cv.create_text(0, 0, text=g, font=(FONT, 30)),
-                              cv.create_text(0, 0, text=g, font=(FONT, 22))))
+                              cv.create_text(0, 0, text=g, font=(FONT, 24), fill="#FFFFFF"), cv.create_text(0, 0, text=g, font=(FONT, 30), fill="#FFFFFF"),
+                              cv.create_text(0, 0, text=g, font=(FONT, 22), fill="#FFFFFF")))
 
         def place(grp, c):
             x, y, ang, t, st = c
@@ -890,8 +892,9 @@ class ArenaRenderer:
     def _i_chase(self, _):
         cv = self.cv
         self.cx1, self.cx2 = self.mk_cross("#FFD166")
-        self.blade = self._low(cv.create_polygon(0, 0, 0, 0, 0, 0, 0, 0, fill="#FF5C5C", outline="#FFFFFF", width=2, state="hidden"))
-        self.bglyph = self._low(cv.create_text(0, 0, text=self.g or "", font=(FONT, 20), state="hidden"))
+        self.blade = self._low(cv.create_polygon(0, 0, 0, 0, 0, 0, 0, 0, fill=self.pcol if self.g else "#FF5C5C",
+                                                 outline="#FFFFFF", width=2, state="hidden"))
+        self.bglyph = self._low(cv.create_text(0, 0, text=self.g or "", font=(FONT, 20), state="hidden", fill="#FFFFFF"))
 
     def _m_chase(self, s):
         ax, ay = s["aim"]
@@ -899,14 +902,12 @@ class ArenaRenderer:
         x, y = s["c"]
         r = s["cr"]
         vis = self.vis(x, y)
+        self.xy(self.blade, x, y - r, x + r, y, x, y + r, x - r, y)
+        self.show(self.blade, vis)
         if self.g:
             self.xy(self.bglyph, x, y)
             self.cfg(self.bglyph, font=(FONT, max(14, int(r * 1.5))))
             self.show(self.bglyph, vis)
-            self.show(self.blade, False)
-        else:
-            self.xy(self.blade, x, y - r, x + r, y, x, y + r, x - r, y)
-            self.show(self.blade, vis)
 
     # ── orbit: 회전 칼날 구체 ──
     def _i_orbit(self, _):
@@ -930,7 +931,7 @@ class ArenaRenderer:
         def make():
             cv = self.cv
             return self._low((cv.create_line(0, 0, 0, 0, fill="#C8D0E0", width=int(bw * 0.7)),
-                              cv.create_text(0, 0, text=g or "🗡", font=(FONT, 20))))
+                              cv.create_text(0, 0, text=g or "🗡", font=(FONT, 20), fill="#FFFFFF")))
         data = [(ox + math.cos(th + i * math.tau / nb) * L, oy + math.sin(th + i * math.tau / nb) * L, ox, oy) for i in range(nb)]
 
         def place(grp, d):
@@ -950,12 +951,12 @@ class ArenaRenderer:
                                               font=(FONT, 9, "bold"), state="hidden"))
         self.a_arc = self._low(cv.create_arc(0, 0, 0, 0, style="pieslice", fill="#5A2222", outline="#FF8A8A", state="hidden"))
         self.d_arc = self._low(cv.create_arc(0, 0, 0, 0, style="pieslice", fill="#1F3A5A", outline="#8AD1FF", state="hidden"))
-        self.a_sw = self._low(cv.create_text(0, 0, text="🗡", font=(FONT, 22), state="hidden"))
-        self.d_sw = self._low(cv.create_text(0, 0, text="🗡", font=(FONT, 22), state="hidden"))
+        self.a_sw = self._low(cv.create_text(0, 0, text="🗡", font=(FONT, 22), state="hidden", fill="#FFFFFF"))
+        self.d_sw = self._low(cv.create_text(0, 0, text="🗡", font=(FONT, 22), state="hidden", fill="#FFFFFF"))
         self.a_ln = self._low(cv.create_line(0, 0, 0, 0, fill="#FFB0B0", width=4, state="hidden"))
         self.d_ln = self._low(cv.create_line(0, 0, 0, 0, fill="#B0E0FF", width=4, state="hidden"))
-        self.stun_a = cv.create_text(0, 0, text="💫", font=(FONT, 16), state="hidden")
-        self.stun_d = cv.create_text(0, 0, text="💫", font=(FONT, 16), state="hidden")
+        self.stun_a = cv.create_text(0, 0, text="💫", font=(FONT, 16), state="hidden", fill="#FFFFFF")
+        self.stun_d = cv.create_text(0, 0, text="💫", font=(FONT, 16), state="hidden", fill="#FFFFFF")
 
     def _fighter(self, x, y, face, lock, st, prog, reach, arc, arc_it, ln, sw, stun, tint):
         wind, rec = st == 1, st == 2
@@ -996,7 +997,7 @@ class ArenaRenderer:
         self.v_boom = self._low(cv.create_oval(0, 0, 0, 0, outline="#FF3B3B", width=2, dash=(5, 4), state="hidden"))
         self.v_boom_f = self._low(cv.create_oval(0, 0, 0, 0, fill="#B81D1D", outline="", state="hidden"))
         self.v_core = self._low(cv.create_oval(0, 0, 0, 0, fill="#07030F", outline="#B070FF", width=3, state="hidden"))
-        self.v_txt = self._low(cv.create_text(0, 0, text=self.g or "🌀", font=(FONT, 26), state="hidden"))
+        self.v_txt = self._low(cv.create_text(0, 0, text=self.g or "🌀", font=(FONT, 26), state="hidden", fill="#FFFFFF"))
         self.cx1, self.cx2 = self.mk_cross("#B070FF")
 
     def _m_vortex(self, s):
@@ -1030,10 +1031,10 @@ class ArenaRenderer:
         def make():
             cv = self.cv
             return self._low((cv.create_oval(0, 0, 0, 0, outline="#FF8A3D", width=2, dash=(4, 4)),          # 출구
-                              cv.create_text(0, 0, text="❓", font=(FONT, 14)),
+                              cv.create_text(0, 0, text="❓", font=(FONT, 14), fill="#FFFFFF"),
                               cv.create_line(0, 0, 0, 0, fill="#7A4AD6", dash=(3, 5)),                        # 연결선
                               cv.create_oval(0, 0, 0, 0, fill="#2A0F4A", outline="#B070FF", width=3),         # 입구
-                              cv.create_text(0, 0, text="🌀", font=(FONT, 22))))
+                              cv.create_text(0, 0, text="🌀", font=(FONT, 22), fill="#FFFFFF")))
 
         def place(grp, p):
             x, y, xx, xy_, age = p
@@ -1130,14 +1131,12 @@ class ArenaRenderer:
 
         def make():
             cv = self.cv
-            return self._low((cv.create_rectangle(0, 0, 0, 0, fill="#F5F5F5", outline="#222", state="normal" if not g else "hidden"),
-                              cv.create_text(0, 0, text=g or "🎲", font=(FONT, int(r * (1.3 if g else 1.0))))))
+            return self._low((cv.create_oval(0, 0, 0, 0, fill=self.pcol, outline=mix(self.pcol, "#FFFFFF", 0.45), width=1),
+                              cv.create_text(0, 0, text=g or "🎲", fill="#FFFFFF" if g else "#222222", font=(FONT, int(r * 1.3)))))
 
         def place(grp, d):
             self.xy(grp[0], d[0] - r, d[1] - r, d[0] + r, d[1] + r)
             self.xy(grp[1], d[0], d[1])
-            if g:
-                self.show(grp[0], False)
         self.pool("d", s["dc"], make, place)
 
     # ── pick ──
@@ -1179,27 +1178,15 @@ class App:
         self.root.resizable(False, False)
         self.deck = load_deck()
         self.mode = None          # None | 'ai' | 'host' | 'guest'
-        self.g = None
-        self.view = None
-        self.sel_id = None
-        self.net = None
+        self.g, self.view, self.sel_id, self.net = None, None, None, None
         self.deck_back = "menu"          # 덱 화면의 '뒤로' 목적지 (메뉴 / 대기실)
         self.reset_lobby_state()
-        self.ai_job = None
-        self.prev_hp = None
-        self.msg_job = None
-        self.fx_token = 0
-        self.fx_widgets = []
-        self.sound = Sound(self.root)
-        self.zoom_f = None
+        self.ai_job, self.prev_hp, self.msg_job, self.fx_token, self.fx_widgets = None, None, None, 0, []
+        self.sound, self.zoom_f = Sound(self.root), None
         self.root.bind("<Escape>", lambda e: self.close_zoom())
         # 실시간 아레나 상태
-        self.ar = None
-        self.keys = set()
-        self.key_jobs = {}
-        self.mouse = (AR.SIZE / 2, AR.SIZE / 2)
-        self.click_count = 0
-        self.pick_sent = None
+        self.ar, self.keys, self.key_jobs, self.mouse = None, set(), {}, (AR.SIZE / 2, AR.SIZE / 2)
+        self.click_count, self.pick_sent = 0, None
         self.guest_arena = False      # (방장) 상대가 아레나를 지원하는지
         self.remote_in = {}           # (방장) 상대가 보낸 아레나 입력
         self.root.bind("<KeyPress>", self.on_key_down)
@@ -1251,8 +1238,7 @@ class App:
     def build_menu(self):
         f, c = self.make_screen("menu")
         c.create_text(W / 2, 62, text="🃏 한 장 승부", font=(FONT, 42, "bold"), fill=TEXT_DARK)
-        c.create_text(W / 2, 112, text="설치로 판을 깔고, 즉발로 승부를 내는 1:1 카드 배틀",
-                      font=(FONT, 12), fill=TEXT_MUTED)
+        c.create_text(W / 2, 112, text="설치로 판을 깔고, 즉발로 승부를 내는 1:1 카드 배틀", font=(FONT, 12), fill=TEXT_MUTED)
         p = panel(c, W / 2 - 230, 140, 460, 465, r=26, pad=22)
         self.menu_deck_lbl = tk.Label(p, font=(FONT, 11, "bold"), bg=CARD_BG)
         self.menu_deck_lbl.pack(pady=(0, 10))
@@ -1262,7 +1248,7 @@ class App:
                  ("📖  규칙 보기", self.show_rules, "#E07B2A", "#F09040", "#C06010"),
                  ("🚪  종료", self.root.destroy, "#C9A876", "#D9BA8C", "#B5905F")]
         for t, cmd, a, b, d in items:
-            RBtn(p, t, cmd, w=380, h=54, r=18, fc=a, hc=b, pc=d, font=(FONT, 13, "bold")).pack(pady=5)
+            RBtn(p, t, cmd, w=380, h=54, r=18, theme=(a, b, d), font=(FONT, 13, "bold")).pack(pady=5)
 
     def update_menu(self):
         err = validate_deck(self.deck)
@@ -1272,39 +1258,14 @@ class App:
             self.menu_deck_lbl.config(text=f"내 덱 {len(self.deck)}장 ✔ 준비 완료", fg=SUCCESS_TXT)
 
     def show_rules(self):
-        lim = CFG["rarity_limit"]
-        messagebox.showinfo("규칙", (
-            f"• 덱 {CFG['deck_min']}~{CFG['deck_max']}장. 일반 제한 없음 / 레어 {lim['rare']} / 영웅 {lim['hero']} / 레전드 {lim['legend']}장까지\n"
-            f"• 같은 카드는 덱에 최대 {CFG['max_copies']}장까지\n"
-            f"• 시작 체력 {CFG['start_hp']}, 손패 {CFG['start_hand']}장, 선공 무작위, 체력 0이면 패배\n"
-            f"• 설치 카드: 턴을 쓰지 않지만 한 턴에 1장만 (설치 칸 최대 {CFG['field_max']})\n"
-            "• 즉발 카드: 사용하면 턴이 끝나요. 손패에 즉발 카드가 있으면 턴을 넘길 수 없어요\n"
-            f"• 매 턴 시작에 {CFG['draw_per_turn']}장 뽑기"
-            f"{' (선공 첫 턴 제외)' if CFG['first_player_skips_draw'] else ''}\n"
-            f"• 덱을 다 뽑으면 내 덱 전체로 리필하고 {CFG['refill_draw']}장 뽑기\n"
-            f"• 손패 최대 {CFG['hand_limit']}장\n"
-            "• 설치 중에는 'N턴 뒤 발동'이나 '설치가 N장 이상일 때만 발동'하는 카드가 있어요\n"
-            "• 확률 카드는 결과가 무작위예요 (방장 컴퓨터가 굴려요)\n"
-            "• 방어로는 피해를 1 아래로 줄일 수 없어요 (보호막은 전부 막아요)\n"
-            "• 등급: 일반(피해 1~2, 단독 효과) / 레어(2~4, 쓸만한 특수) /\n"
-            "  영웅(3~5, 강하지만 리스크) / 레전드(각각 다른 독특한 효과)\n\n"
-            "• 공격 카드를 쓰면 검은 아레나가 열려요. 공격하는 쪽은 카드마다 다른 방식으로 마우스 조종,\n"
-            "  맞는 쪽은 WASD / 방향키로 피해요. 맞은 만큼만 피해가 들어가요 (한글 입력 상태에서도 돼요)\n"
-            "• 공격 방식은 카드마다 달라요: 위에서 쏟아지는 화살비·불비, 방패로 막기, 부채꼴 화염, 레이저, 칼날 달린 공 조종,\n"
-            "  서로 칼싸움(지면 반격 피해!), 블랙홀, 차원문 순간이동, 심판 격자, 치유 의식(방해받으면 줄어요),\n"
-            "  초록 구슬(상대가 회복), 조작 반전·얼음판·시야 제한 같은 변형까지. 카드 확대(🔍)에서 자세히 볼 수 있어요\n"
-            "• 상자 고르기 같은 확률 카드는 맞는 쪽이 직접 골라요 (안전하면 회복, 위험하면 피해)\n"
-            "• 방어 설치(방벽)는 받는 피해를 N까지 막고, 다 막거나 지속 턴이 지나면 사라져요\n"
-            "• 필드 전용 카드는 아레나에서만 효과가 있어요 (피할 때 속도 증가 등)\n\n"
-            "카드 클릭 = 선택, 더블클릭 = 바로 사용\n"
-            "오른쪽 클릭 / '🔍 자세히' 버튼 / 설치된 카드 클릭 = 카드 확대 (덱 구성에서는 카드 클릭)"))
+        messagebox.showinfo("규칙", rules_text().replace("(창 버전. 터미널은 자동 판정)", "(한글 입력 상태에서도 돼요)")
+                            + "\n\n카드 클릭 = 선택, 더블클릭 = 바로 사용\n오른쪽 클릭 / '🔍 자세히' 버튼 / 설치된 카드 클릭 = 카드 확대 (덱 구성에서는 카드 클릭)")
 
     # ── 덱 구성 ──
     def build_deck(self):
         f, c = self.make_screen("deck")
         bar = panel(c, 20, 16, 1260, 72, r=20, pad=12)
-        self.deck_back_btn = RBtn(bar, "← 메뉴", lambda: self.show(self.deck_back), w=110, h=42, fc=SECONDARY,
-                                  hc=SECONDARY_H, pc=SECONDARY_P)
+        self.deck_back_btn = RBtn(bar, "← 메뉴", lambda: self.show(self.deck_back), w=110, h=42, theme="blue")
         self.deck_back_btn.pack(side="left", padx=(0, 14))
         tk.Label(bar, text="🃏 덱 구성", font=(FONT, 18, "bold"), bg=CARD_BG, fg=TEXT_DARK).pack(side="left")
         self.deck_total = tk.Label(bar, font=(FONT, 13, "bold"), bg=CARD_BG)
@@ -1314,8 +1275,8 @@ class App:
             lb = tk.Label(bar, font=(FONT, 10, "bold"), bg=CARD_BG, fg=RC[r])
             lb.pack(side="left", padx=6)
             self.meters[r] = lb
-        RBtn(bar, "비우기", self.deck_clear, w=90, h=42, fc="#C9A876", hc="#D9BA8C", pc="#B5905F").pack(side="right")
-        RBtn(bar, "자동 구성", self.deck_auto, w=110, h=42, fc=TEAL, hc="#3ED9CA", pc=TEAL_DARK).pack(side="right", padx=8)
+        RBtn(bar, "비우기", self.deck_clear, w=90, h=42, theme="tan").pack(side="right")
+        RBtn(bar, "자동 구성", self.deck_auto, w=110, h=42, theme="teal").pack(side="right", padx=8)
 
         cont = tk.Frame(c, bg=BG_BOTTOM)
         c.create_window(20, 106, anchor="nw", window=cont, width=1260, height=H - 116)
@@ -1340,17 +1301,16 @@ class App:
         for i, d in enumerate(order):
             t = tk.Frame(inner, bg=BG_BOTTOM)
             t.grid(row=i // 7, column=i % 7, padx=8, pady=8)
-            CardView(t, d["id"], 150, 210, bg=BG_BOTTOM,
-                     cmd=lambda cid=d["id"]: self.show_zoom(cid)).pack()
+            CardView(t, d["id"], 150, 210, bg=BG_BOTTOM, cmd=lambda cid=d["id"]: self.show_zoom(cid)).pack()
             ctl = tk.Frame(t, bg=BG_BOTTOM)
             ctl.pack(pady=(6, 0))
             minus = RBtn(ctl, "−", lambda cid=d["id"]: self.deck_change(cid, -1), w=40, h=30, r=12,
-                         bg=BG_BOTTOM, fc=SECONDARY, hc=SECONDARY_H, pc=SECONDARY_P, font=(FONT, 12, "bold"))
+                         bg=BG_BOTTOM, theme="blue", font=(FONT, 12, "bold"))
             minus.pack(side="left")
             cnt = tk.Label(ctl, text="0", font=(FONT, 13, "bold"), bg=BG_BOTTOM, fg=TEXT_DARK, width=3)
             cnt.pack(side="left")
             plus = RBtn(ctl, "+", lambda cid=d["id"]: self.deck_change(cid, 1), w=40, h=30, r=12,
-                        bg=BG_BOTTOM, fc=PRIMARY, hc=PRIMARY_H, pc=PRIMARY_P, font=(FONT, 12, "bold"))
+                        bg=BG_BOTTOM, theme="primary", font=(FONT, 12, "bold"))
             plus.pack(side="left")
             self.tiles[d["id"]] = (cnt, minus, plus)
 
@@ -1368,8 +1328,7 @@ class App:
             k = self.deck.count(cid)
             cnt.config(text=str(k))
             minus.enable(k > 0)
-            plus.enable(not full and k < CFG["max_copies"]
-                        and rc[CARDS[cid]["rarity"]] < LIMIT[CARDS[cid]["rarity"]])
+            plus.enable(not full and k < CFG["max_copies"] and rc[CARDS[cid]["rarity"]] < LIMIT[CARDS[cid]["rarity"]])
 
     def deck_change(self, cid, d):
         if d > 0:
@@ -1404,7 +1363,7 @@ class App:
         tk.Frame(p, bg=NEUTRAL_BD, height=2).pack(fill="x", pady=12)
         tk.Label(p, text="방 만들기", font=(FONT, 16, "bold"), **lab).pack(anchor="w")
         tk.Label(p, text="5자리 방 번호가 만들어져요. 번호를 친구에게 알려 주세요.", **muted).pack(anchor="w")
-        RBtn(p, "방 만들기", self.create_room, w=150, h=42, fc=PRIMARY, hc=PRIMARY_H, pc=PRIMARY_P).pack(anchor="w", pady=10)
+        RBtn(p, "방 만들기", self.create_room, w=150, h=42, theme="primary").pack(anchor="w", pady=10)
         tk.Frame(p, bg=NEUTRAL_BD, height=2).pack(fill="x", pady=6)
         tk.Label(p, text="방 참가", font=(FONT, 16, "bold"), **lab).pack(anchor="w")
         tk.Label(p, text="친구가 알려 준 5자리 방 번호를 입력하세요.", **muted).pack(anchor="w")
@@ -1415,11 +1374,11 @@ class App:
                                   validate="key", validatecommand=(ok5, "%P"))
         self.join_code.pack(side="left", padx=(0, 10))
         self.join_code.bind("<Return>", lambda e: self.start_join())
-        RBtn(row2, "참가", self.start_join, w=90, h=44, fc=SECONDARY, hc=SECONDARY_H, pc=SECONDARY_P).pack(side="left")
+        RBtn(row2, "참가", self.start_join, w=90, h=44, theme="blue").pack(side="left")
         self.on_status = tk.Label(p, text="", font=(FONT, 11), bg=NEUTRAL_BG, fg=TEXT_DARK, wraplength=520,
                                   justify="left", padx=12, pady=12)
         self.on_status.pack(fill="x", pady=(10, 8))
-        RBtn(p, "← 메뉴", self.leave, w=110, h=40, fc="#C9A876", hc="#D9BA8C", pc="#B5905F").pack(anchor="w", pady=(6, 0))
+        RBtn(p, "← 메뉴", self.leave, w=110, h=40, theme="tan").pack(anchor="w", pady=(6, 0))
 
     def set_online_status(self, text, bad=False):
         self.on_status.config(text=text, bg=FAIL_BG if bad else NEUTRAL_BG)
@@ -1449,8 +1408,7 @@ class App:
         srv = self.server_addr()
         if srv:
             self.leave_net()
-            self.net = Net()
-            self.room_code = code
+            self.net, self.room_code = Net(), code
             self.net.join(srv, code)
             self.set_online_status("방에 들어가는 중…")
 
@@ -1464,7 +1422,7 @@ class App:
         tk.Label(row, text="방 번호", font=(FONT, 12, "bold"), bg=CARD_BG, fg=TEXT_MUTED).pack(side="left", padx=(0, 14))
         self.lb_code = tk.Label(row, text="-----", font=(FONT, 46, "bold"), bg=CARD_BG, fg=PRIMARY)
         self.lb_code.pack(side="left")
-        RBtn(row, "📋 복사", self.copy_room_code, w=100, h=40, fc=TEAL, hc="#3ED9CA", pc=TEAL_DARK).pack(side="left", padx=(16, 0))
+        RBtn(row, "📋 복사", self.copy_room_code, w=100, h=40, theme="teal").pack(side="left", padx=(16, 0))
         self.lb = {}
         for who, x in (("me", W / 2 - 380), ("op", W / 2 + 10)):
             pn = panel(c, x, 200, 370, 270, r=22, pad=16)
@@ -1477,15 +1435,14 @@ class App:
             if who == "me":
                 bt = tk.Frame(pn, bg=CARD_BG)
                 bt.pack(anchor="w", pady=(18, 0))
-                RBtn(bt, "🃏 덱 편집", self.lobby_edit_deck, w=130, h=46, fc=TEAL, hc="#3ED9CA", pc=TEAL_DARK).pack(side="left")
-                w["ready"] = RBtn(bt, "준비완료", self.toggle_ready, w=150, h=46, fc=PRIMARY, hc=PRIMARY_H, pc=PRIMARY_P,
-                                  font=(FONT, 12, "bold"))
+                RBtn(bt, "🃏 덱 편집", self.lobby_edit_deck, w=130, h=46, theme="teal").pack(side="left")
+                w["ready"] = RBtn(bt, "준비완료", self.toggle_ready, w=150, h=46, theme="primary", font=(FONT, 12, "bold"))
                 w["ready"].pack(side="left", padx=(10, 0))
             self.lb[who] = w
         bot = panel(c, W / 2 - 380, 486, 760, 130, r=22, pad=14)
         self.lb_msg = tk.Label(bot, font=(FONT, 12, "bold"), bg=CARD_BG, fg=TEXT_DARK, wraplength=700)
         self.lb_msg.pack(pady=(2, 10))
-        RBtn(bot, "나가기", self.leave, w=110, h=40, fc="#C9A876", hc="#D9BA8C", pc="#B5905F").pack()
+        RBtn(bot, "나가기", self.leave, w=110, h=40, theme="tan").pack()
 
     def copy_room_code(self):
         self.root.clipboard_clear()
@@ -1565,9 +1522,7 @@ class App:
         if (self.net and self.net.role == "host" and not self.g and self.my_ready and self.opp_ready
                 and self.opp_deck and not validate_deck(self.deck)):
             self.reset_game_state()
-            self.mode = "host"
-            self.guest_arena = True
-            self.g = Game(self.deck, self.opp_deck)
+            self.mode, self.guest_arena, self.g = "host", True, Game(self.deck, self.opp_deck)
             self.net.ready = True
             self.my_ready = self.opp_ready = False
             self.show("battle")
@@ -1580,9 +1535,7 @@ class App:
             else:
                 return                                        # 진행 중에는 무시
         err = validate_deck(m.get("deck"))
-        self.opp_here = True
-        self.opp_deck = None if err else list(m["deck"])
-        self.opp_err = err
+        self.opp_here, self.opp_deck, self.opp_err = True, None if err else list(m["deck"]), err
         self.opp_ready = bool(m.get("ready")) and not err
         self.lobby_refresh()
         self.try_start()
@@ -1661,14 +1614,12 @@ class App:
         self.use_btn = RBtn(ar, "사용하기", self.use_selected, w=150, h=42, r=16, font=(FONT, 12, "bold"))
         self.use_btn.pack(side="left")
         self.end_btn = RBtn(ar, "턴 넘기기", lambda: self.do_action({"a": "end"}), w=150, h=42, r=16,
-                            fc=SECONDARY, hc=SECONDARY_H, pc=SECONDARY_P, font=(FONT, 12, "bold"))
+                            theme="blue", font=(FONT, 12, "bold"))
         self.end_btn.pack(side="left", padx=10)
-        self.zoom_btn = RBtn(ar, "🔍 자세히", self.zoom_selected, w=110, h=42, r=16,
-                             fc=TEAL, hc="#3ED9CA", pc=TEAL_DARK, font=(FONT, 10, "bold"))
+        self.zoom_btn = RBtn(ar, "🔍 자세히", self.zoom_selected, w=110, h=42, r=16, theme="teal", font=(FONT, 10, "bold"))
         self.zoom_btn.pack(side="left")
-        RBtn(ar, "나가기", self.leave, w=90, h=42, r=16, fc="#C9A876", hc="#D9BA8C", pc="#B5905F").pack(side="left", padx=(10, 0))
-        self.snd_btn = RBtn(ar, "🔊 소리 켬", self.toggle_sound, w=110, h=42, r=16, fc="#8A9BB8", hc="#9EAECA", pc="#6F82A3",
-                            font=(FONT, 9, "bold"))
+        RBtn(ar, "나가기", self.leave, w=90, h=42, r=16, theme="tan").pack(side="left", padx=(10, 0))
+        self.snd_btn = RBtn(ar, "🔊 소리 켬", self.toggle_sound, w=110, h=42, r=16, theme="gray", font=(FONT, 9, "bold"))
         self.snd_btn.pack(side="left", padx=(10, 0))
         self.hint_lbl = tk.Label(ar, font=(FONT, 10), bg=CARD_BG, fg=TEXT_MUTED, wraplength=400, justify="left")
         self.hint_lbl.pack(side="left", padx=16)
@@ -1681,10 +1632,10 @@ class App:
         self.over_sub.pack()
         ob = tk.Frame(self.over_f, bg=CARD_BG)
         ob.pack(pady=22)
-        self.again_btn = RBtn(ob, "다시 하기", self.start_ai, w=130, h=44, fc=PRIMARY, hc=PRIMARY_H, pc=PRIMARY_P)
+        self.again_btn = RBtn(ob, "다시 하기", self.start_ai, w=130, h=44, theme="primary")
         self.again_btn.pack(side="left", padx=6)
-        self.lobby_btn = RBtn(ob, "대기실로", self.back_to_lobby, w=130, h=44, fc=TEAL, hc="#3ED9CA", pc=TEAL_DARK)
-        self.over_menu_btn = RBtn(ob, "메뉴로", self.leave, w=130, h=44, fc=SECONDARY, hc=SECONDARY_H, pc=SECONDARY_P)
+        self.lobby_btn = RBtn(ob, "대기실로", self.back_to_lobby, w=130, h=44, theme="teal")
+        self.over_menu_btn = RBtn(ob, "메뉴로", self.leave, w=130, h=44, theme="blue")
         self.over_menu_btn.pack(side="left", padx=6)
 
     def set_msg(self, text, bad=True):
@@ -1790,8 +1741,7 @@ class App:
         if v["o"]:
             self.over_title.config(text="승리! 🎉" if v["w"] == 1 else "패배…" if v["w"] == 0 else "무승부",
                                    fg=SUCCESS_TXT if v["w"] == 1 else FAIL_TXT if v["w"] == 0 else TEXT_DARK)
-            self.over_sub.config(text="상대의 체력을 모두 깎았어요." if v["w"] == 1 else
-                                 "체력이 0이 되었어요." if v["w"] == 0 else "둘 다 쓰러졌어요.")
+            self.over_sub.config(text="상대의 체력을 모두 깎았어요." if v["w"] == 1 else "체력이 0이 되었어요." if v["w"] == 0 else "둘 다 쓰러졌어요.")
             self.again_btn.pack_forget()
             self.lobby_btn.pack_forget()
             if self.mode == "ai":
@@ -1973,19 +1923,16 @@ class App:
         right = tk.Frame(box, bg=CARD_BG)
         right.grid(row=0, column=1, padx=(14, 26), pady=26, sticky="n")
         wrap = 470
-        tk.Label(right, text=f"{glyph(c)}  {c['name']}", font=(FONT, 26, "bold"), bg=CARD_BG, fg=TEXT_DARK
-                 ).pack(anchor="w")
+        tk.Label(right, text=f"{glyph(c)}  {c['name']}", font=(FONT, 26, "bold"), bg=CARD_BG, fg=TEXT_DARK).pack(anchor="w")
         tk.Label(right, text=f"{RN[c['rarity']]} · {KN[c['kind']]} 카드", font=(FONT, 12, "bold"), bg=CARD_BG,
                  fg=rc).pack(anchor="w", pady=(0, 10))
         tk.Label(right, text=describe(c), font=(FONT, 15, "bold"), bg=NEUTRAL_BG, fg=TEXT_DARK, wraplength=wrap - 24,
                  justify="left", padx=12, pady=10).pack(fill="x")
-        tk.Label(right, text="자세한 규칙", font=(FONT, 11, "bold"), bg=CARD_BG, fg=TEXT_MUTED
-                 ).pack(anchor="w", pady=(14, 4))
+        tk.Label(right, text="자세한 규칙", font=(FONT, 11, "bold"), bg=CARD_BG, fg=TEXT_MUTED).pack(anchor="w", pady=(14, 4))
         for note in card_notes(c):
             tk.Label(right, text="•  " + note, font=(FONT, 11), bg=CARD_BG, fg=TEXT_DARK, wraplength=wrap,
                      justify="left").pack(anchor="w", pady=2)
-        RBtn(right, "닫기 (Esc)", self.close_zoom, w=130, h=40, fc=SECONDARY, hc=SECONDARY_H,
-             pc=SECONDARY_P).pack(anchor="w", pady=(16, 0))
+        RBtn(right, "닫기 (Esc)", self.close_zoom, w=130, h=40, theme="blue").pack(anchor="w", pady=(16, 0))
         self.zoom_f = z
 
     def close_zoom(self):
@@ -2203,9 +2150,7 @@ class App:
         spec = pd["spec"]
         f, cv, lbl = self.build_arena_ui(pd["cid"], me_att, spec, pd["mods"])
         now = time.perf_counter()
-        self.click_count = 0
-        self.pick_sent = None
-        self.remote_in = {}
+        self.click_count, self.pick_sent, self.remote_in = 0, None, {}
         self.keys.clear()
         self.ar = {"kind": kind, "sim": sim, "cid": pd["cid"], "spec": spec, "me_att": me_att, "f": f, "cv": cv,
                    "lbl": lbl, "phase": "intro", "t0": now, "last": now, "acc": 0.0, "snap": None, "result": None,
@@ -2432,8 +2377,7 @@ class App:
             return
         self.leave_net()
         self.reset_game_state()
-        self.mode = "ai"
-        self.g = Game(self.deck, auto_deck())
+        self.mode, self.g = "ai", Game(self.deck, auto_deck())
         self.show("battle")
         self.after_change()
 
@@ -2444,12 +2388,7 @@ class App:
         self.clear_fx()
         if self.ai_job:
             self.root.after_cancel(self.ai_job)
-        self.ai_job = None
-        self.g = None
-        self.view = None
-        self.sel_id = None
-        self.prev_hp = None
-        self.mode = None
+        self.ai_job, self.g, self.view, self.sel_id, self.prev_hp, self.mode = None, None, None, None, None, None
 
     def leave(self):
         self.leave_net()
