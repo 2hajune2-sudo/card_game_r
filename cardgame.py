@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""한 장 승부 - 턴제 카드 배틀 (터미널 / AI 대전 / 온라인 대전)
+"""한 장 승부 - 턴제 카드 배틀의 규칙 엔진 + 터미널(AI 대전) 버전
 
 실행:
     python cardgame.py                  메뉴
-    python cardgame.py host             방 만들기 (방 코드가 나와요)
-    python cardgame.py join 코드        방 참가 (방장이 알려 준 코드)
+    python cardgame.py ai               바로 AI 대전
     python cardgame.py --no-color       색 끄기
+(온라인 대전은 창 버전 cardgame_gui.py + relay_server.py 로 해요)
 
 카드와 규칙 숫자는 cards.json 에서 바꿉니다. 새 효과를 만들려면
 OPS(문구)와 Game.run_fx(동작)에 추가하세요.
@@ -14,13 +14,11 @@ OPS(문구)와 Game.run_fx(동작)에 추가하세요.
 import json
 import os
 import random
-import socket
 import sys
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DECK_FILE = os.path.join(HERE, "deck.json")
-DEFAULT_PORT = 5050
 
 
 # ----------------------------------------------------------------------
@@ -86,8 +84,7 @@ OPS = {
     "mirror":       lambda e: "상대가 마지막으로 쓴 즉발 카드의 효과를 그대로 사용",
     "foe":          lambda e: f"상대가: [{fx_text(e['fx'])}]",
 }
-ON_LABEL = {"play": "설치 즉시", "turnStart": "내 턴 시작",
-            "turnEnd": "내 턴 끝", "hit": "피해를 받을 때", "expire": "시한 만료"}
+ON_LABEL = {"play": "설치 즉시", "turnStart": "내 턴 시작", "turnEnd": "내 턴 끝", "hit": "피해를 받을 때", "expire": "시한 만료"}
 RN = {"common": "일반", "rare": "레어", "hero": "영웅", "legend": "레전드"}
 KN = {"instant": "즉발", "install": "설치"}
 RORDER = ["common", "rare", "hero", "legend"]
@@ -291,8 +288,7 @@ def rarity_counts(deck):
 
 def validate_deck(deck):
     if not isinstance(deck, list) or not CFG["deck_min"] <= len(deck) <= CFG["deck_max"]:
-        return (f"덱은 {CFG['deck_min']}~{CFG['deck_max']}장이어야 해요. "
-                f"(지금 {len(deck) if isinstance(deck, list) else '?'}장)")
+        return (f"덱은 {CFG['deck_min']}~{CFG['deck_max']}장이어야 해요. " f"(지금 {len(deck) if isinstance(deck, list) else '?'}장)")
     if any(cid not in CARDS for cid in deck):
         return "존재하지 않는 카드가 있어요."
     n = rarity_counts(deck)
@@ -350,9 +346,7 @@ def save_deck(deck):
 # ----------------------------------------------------------------------
 class Player:
     def __init__(self, deck):
-        self.hp = CFG["start_hp"]
-        self.deck_list = list(deck)
-        self.deck = random.sample(deck, len(deck))
+        self.hp, self.deck_list, self.deck = CFG["start_hp"], list(deck), random.sample(deck, len(deck))
         self.hand = []
         self.field = []   # {"id", "left", "fresh"}
         self.poison = 0   # 남은 중독 턴
@@ -371,12 +365,9 @@ def pull(hand, n):
 
 class Game:
     def __init__(self, deck0, deck1):
-        self.p = [Player(deck0), Player(deck1)]
-        self.turn = random.randint(0, 1)
-        self.over = False
+        self.p, self.turn, self.over = [Player(deck0), Player(deck1)], random.randint(0, 1), False
         self.winner = None  # 0, 1, -1(무승부)
-        self.log = []
-        self.seq = 0
+        self.log, self.seq = [], 0
         self.installed = False             # 이번 턴에 설치 카드를 썼는지 (턴당 1장)
         self.last = None                   # 마지막으로 사용된 카드 (플레이어, 카드 id)
         self.last_instant = [None, None]   # 각 플레이어가 마지막으로 쓴 즉발 카드 (거울의 방용)
@@ -426,8 +417,7 @@ class Game:
                         break
         dead = [i for i in (0, 1) if self.p[i].hp <= 0]
         if dead:
-            self.over = True
-            self.winner = -1 if len(dead) == 2 else 1 - dead[0]
+            self.over, self.winner = True, -1 if len(dead) == 2 else 1 - dead[0]
 
     def fire(self, pi, trig, no_hit=False):
         """pi 의 설치 카드 중 trig 시점에 발동하는 것을 실행 (need: 설치 장수 조건)."""
@@ -1066,195 +1056,12 @@ def play_ai(deck):
 
 
 # ----------------------------------------------------------------------
-# 온라인 (TCP, 줄 단위 JSON). 방장이 게임을 진행하고 참가자는 행동만 보냅니다.
-# ----------------------------------------------------------------------
-class Conn:
-    def __init__(self, sock):
-        self.sock = sock
-        try:
-            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)   # 작은 메시지를 모아 보내지 않게 (지연 감소)
-        except OSError:
-            pass
-        self.f = sock.makefile("rw", encoding="utf-8", newline="\n")
-
-    def send(self, obj):
-        self.f.write(json.dumps(obj, ensure_ascii=False) + "\n")
-        self.f.flush()
-
-    def recv(self):
-        line = self.f.readline()
-        return json.loads(line) if line else None
-
-    def close(self):
-        try:
-            self.sock.close()
-        except OSError:
-            pass
-
-
-def local_ip():
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-            s.connect(("8.8.8.8", 80))
-            return s.getsockname()[0]
-    except OSError:
-        return "127.0.0.1"
-
-
-def public_ip(timeout=2.0):
-    """인터넷용 방 코드에 쓸 공인 IP (실패하면 None)"""
-    try:
-        from urllib.request import urlopen
-        with urlopen("https://api.ipify.org", timeout=timeout) as r:
-            ip = r.read().decode().strip()
-        socket.inet_aton(ip)
-        return ip
-    except Exception:
-        return None
-
-
-# 방 코드 = 방장 주소(IP 4바이트 + 포트 2바이트 + 검사 1바이트)를 32진수 12글자로 줄인 것.
-# 헷갈리는 글자(I L O U)를 뺀 알파벳이라 말로 불러 줘도 안전해요.
-_ALPHA = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
-
-
-def make_code(ip, port):
-    b = bytes(int(x) for x in ip.split(".")) + port.to_bytes(2, "big")
-    n = int.from_bytes(b + bytes([sum(b) % 256]), "big")
-    s = "".join(_ALPHA[n >> (5 * i) & 31] for i in range(11, -1, -1))
-    return "-".join(s[i:i + 4] for i in (0, 4, 8))
-
-
-def parse_code(code):
-    """방 코드 → (ip, 포트). 잘못된 코드면 ValueError"""
-    s = "".join(ch for ch in str(code).upper() if ch.isalnum()).translate(str.maketrans("OILU", "011V"))
-    if len(s) != 12 or any(ch not in _ALPHA for ch in s):
-        raise ValueError("방 코드가 올바르지 않아요. 12글자(예: ABCD-EFGH-JKMN)를 확인해 주세요.")
-    n = 0
-    for ch in s:
-        n = n * 32 + _ALPHA.index(ch)
-    if n >> 56:
-        raise ValueError("방 코드가 올바르지 않아요.")
-    b = n.to_bytes(7, "big")
-    if sum(b[:6]) % 256 != b[6]:
-        raise ValueError("방 코드에 오타가 있어요. 다시 확인해 주세요.")
-    return ".".join(map(str, b[:4])), int.from_bytes(b[4:6], "big")
-
-
-def open_server(port=DEFAULT_PORT):
-    """기본 포트가 쓰이는 중이면 빈 포트를 자동으로 골라요. → (서버 소켓, 실제 포트)"""
-    srv = socket.socket()
-    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    try:
-        srv.bind(("", port))
-    except OSError:
-        srv.bind(("", 0))
-    srv.listen(1)
-    return srv, srv.getsockname()[1]
-
-
-def host_game(deck, port=DEFAULT_PORT):
-    srv, port = open_server(port)
-    print("방을 열었어요! 친구에게 아래 방 코드를 알려 주세요.")
-    print(f"  같은 와이파이/LAN → {make_code(local_ip(), port)}")
-    pub = public_ip()
-    if pub:
-        print(f"  인터넷            → {make_code(pub, port)}   (공유기에서 포트 {port} 포워딩 필요)")
-    print("기다리는 중…")
-    sock, addr = srv.accept()
-    srv.close()
-    c = Conn(sock)
-    hello = c.recv()
-    err = validate_hello(hello)
-    if err:
-        c.send({"t": "err", "msg": err})
-        c.close()
-        print("상대의 덱이 올바르지 않아 종료해요:", err)
-        return
-    print(f"{addr[0]} 접속! 게임을 시작합니다.")
-    g = Game(deck, hello["deck"])
-    try:
-        c.send({"t": "st", "v": g.view_for(1), "n": None})
-        while not g.over:
-            if g.turn == 0:
-                v = g.view_for(0)
-                render(v)
-                ok, msg = g.act(0, ask_action(v))
-                if not ok:
-                    print("⚠", msg)
-                    continue
-                settle(g)
-                c.send({"t": "st", "v": g.view_for(1), "n": None})
-            else:
-                render(g.view_for(0))
-                print("상대 차례… 기다리는 중")
-                m = c.recv()
-                if m is None:
-                    print("상대의 연결이 끊어졌어요.")
-                    return
-                ok, msg = g.act(1, m)
-                settle(g, show=False)
-                c.send({"t": "st", "v": g.view_for(1), "n": None if ok else msg})
-        render(g.view_for(0))
-        show_result(g.view_for(0))
-    except (BrokenPipeError, ConnectionError):
-        print("상대의 연결이 끊어졌어요.")
-    finally:
-        c.close()
-
-
-def validate_hello(m):
-    if not m or m.get("t") != "hello":
-        return "잘못된 접속이에요."
-    return validate_deck(m.get("deck"))
-
-
-def join_game(deck, code):
-    try:
-        ip, port = parse_code(code)
-        c = Conn(socket.create_connection((ip, port), timeout=10))
-    except ValueError as e:
-        print(e)
-        return
-    except OSError as e:
-        print("접속하지 못했어요 (방이 열려 있는지, 코드가 맞는지 확인해 주세요):", e)
-        return
-    c.sock.settimeout(None)
-    c.send({"t": "hello", "deck": deck})
-    try:
-        while True:
-            m = c.recv()
-            if m is None:
-                print("방장의 연결이 끊어졌어요.")
-                return
-            if m["t"] == "err":
-                print("거절됨:", m["msg"])
-                return
-            if m.get("n"):
-                print("⚠", m["n"])
-            v = m["v"]
-            render(v)
-            if v["o"]:
-                show_result(v)
-                return
-            if v["t"] == 1:
-                c.send(ask_action(v))
-            else:
-                print("상대 차례… 기다리는 중")
-    except (BrokenPipeError, ConnectionError):
-        print("방장의 연결이 끊어졌어요.")
-    finally:
-        c.close()
-
-
-# ----------------------------------------------------------------------
 # 덱 구성 / 규칙 / 메뉴
 # ----------------------------------------------------------------------
 def deck_menu(deck):
     while True:
         n = rarity_counts(deck)
-        meters = "  ".join(
-            f"{RN[r]} {n[r]}/{'∞' if LIMIT[r] >= 10 ** 9 else LIMIT[r]}" for r in RORDER)
+        meters = "  ".join(f"{RN[r]} {n[r]}/{'∞' if LIMIT[r] >= 10 ** 9 else LIMIT[r]}" for r in RORDER)
         print(f"\n덱 {len(deck)}장 (최소 {CFG['deck_min']} ~ 최대 {CFG['deck_max']}, 같은 카드 최대 {CFG['max_copies']})   {meters}")
         for cid, c in CARDS.items():
             cnt = deck.count(cid)
@@ -1338,17 +1145,13 @@ def need_valid(deck):
 def menu():
     deck = load_deck()
     while True:
-        print("\n===== 한 장 승부 =====\n 1) AI 대전\n 2) 방 만들기 (온라인)\n 3) 방 참가 (온라인)\n 4) 덱 구성\n 5) 규칙\n 0) 종료")
+        print("\n===== 한 장 승부 =====\n 1) AI 대전\n 2) 덱 구성\n 3) 규칙\n 0) 종료")
         s = input("선택 > ").strip()
         if s == "1" and need_valid(deck):
             play_ai(deck)
-        elif s == "2" and need_valid(deck):
-            host_game(deck)
-        elif s == "3" and need_valid(deck):
-            join_game(deck, input("방 코드 > ").strip())
-        elif s == "4":
+        elif s == "2":
             deck = deck_menu(deck)
-        elif s == "5":
+        elif s == "3":
             show_rules()
         elif s == "0":
             return
@@ -1366,14 +1169,6 @@ def main(argv):
     try:
         if not args:
             menu()
-        elif args[0] == "host":
-            deck = load_deck() if not AUTO else auto_deck()
-            if need_valid(deck):
-                host_game(deck)
-        elif args[0] == "join" and len(args) > 1:
-            deck = load_deck() if not AUTO else auto_deck()
-            if need_valid(deck):
-                join_game(deck, args[1])
         elif args[0] == "ai":
             deck = load_deck() if not AUTO else auto_deck()
             if need_valid(deck):
