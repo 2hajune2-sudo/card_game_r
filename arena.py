@@ -1,31 +1,9 @@
-#!/usr/bin/env python3
 """한 장 승부 - 실시간 아레나 (공격 카드를 쓰면 열리는 검은 정사각형 필드)
 
-공격하는 쪽은 카드마다 다른 방식으로 공격을 '조종'하고, 맞는 쪽은 WASD/방향키로 피합니다.
-이 파일은 화면(tkinter)과 무관한 순수 시뮬레이션이라, 창 화면·AI·터미널 자동 판정이 모두 같이 씁니다.
-
-공격 방식(mode)                     공격자 조작                      피하는 쪽
-  shoot   조준선으로 총알을 쏴요         마우스 조준 + 클릭              이동
-  shield  발사 vs 방패                  마우스 조준 + 클릭              이동 + 마우스로 방패 방향
-  gamble  득실 구슬(초록은 상대가 회복)    마우스 조준 + 클릭              이동 (초록 구슬은 먹어도 돼요)
-  knock   맞으면 밀려나요(벽에 쾅!)       마우스 조준 + 클릭              이동
-  swarm   떼를 유인해요                  마우스로 유인 지점               이동
-  zone    위험 구역을 정해 폭발           마우스 위치 + 클릭              이동
-  rain    위에서 화살/불/운석이 쏟아져요    마우스로 낙하 지점 + 클릭        이동
-  cone    부채꼴 화염/산탄                마우스 조준 + 클릭              이동
-  beam    레이저를 쏘고 휘둘러요           마우스 조준 + 클릭              이동
-  chase   쫓아가는 칼날                  마우스 방향                    이동
-  orbit   회전하는 칼날 달린 공 조종       마우스로 공 이동, 클릭=역회전     이동
-  duel    서로 칼싸움 (지면 반격 피해!)    마우스로 이동 + 클릭=베기        WASD 이동 + 클릭/스페이스=베기
-  vortex  블랙홀로 끌어당겨요             마우스로 블랙홀 이동             이동 (끌려가지 않게)
-  warp    차원문으로 순간이동 시켜요        마우스 위치 + 클릭              이동 (문을 피하세요)
-  grid    칸을 골라 심판해요              마우스로 칸 선택 + 클릭          이동
-  channel 치유 의식 (방해받으면 줄어요)     마우스로 의식 장소 이동          의식 원 안에 서서 방해!
-  bounce  튕겨 다니는 물체                 구경                          이동
-  pick    상자 고르기                    구경                          상자를 직접 골라요
-
-모든 공격에 붙일 수 있는 변형(spec 의 twist): reverse(조작 반전) / rot(조작 90도 회전) / ice(얼음판 미끄러짐) /
-  drunk(취함) / slow(둔화).  fog(시야 제한 반지름), tw_at(몇 초 뒤부터 변형 시작) 도 있어요.
+공격하는 쪽은 카드마다 다른 방식(mode)으로 공격을 '조종'하고, 맞는 쪽은 WASD/방향키로 피해요.
+화면(tkinter)과 무관한 순수 시뮬레이션이라 창 화면·AI·터미널 자동 판정이 모두 같이 써요.
+방식별 조작법은 아래 HELP/CTRL 표에 있고, 카드의 "help": [제목, 공격자, 피하는쪽] 으로 덮어쓸 수 있어요.
+모든 공격에 붙이는 변형(spec): twist(reverse/rot/ice/drunk/slow) · tw_at(시작 시각) · fog(시야 반지름)
 결과: {dmg: 상대 피해, hits, safe, self: 내가 입는 피해, sheal: 내 회복, fheal: 상대 회복}
 """
 import math
@@ -152,19 +130,13 @@ class Arena:
     def __init__(self, spec, seed=0, mods=None):
         self.spec = s = dict(spec)
         self.mode = s["mode"]
-        self.impl = "shoot" if self.mode in SHOOTLIKE else self.mode
-        self.rng = random.Random(seed)
+        self.impl, self.rng = "shoot" if self.mode in SHOOTLIKE else self.mode, random.Random(seed)
         m = {"dodge": 0.0, "shrink": 0.0, "atk": 0.0, "foe_slow": 0.0, "proj_slow": 0.0}
         m.update(mods or {})
-        self.mods = m
-        self.t = 0.0
-        self.time = float(s.get("time", 9.0))
-        self.done = False
-        self.end_t = None
+        self.mods, self.t, self.time, self.done = m, 0.0, float(s.get("time", 9.0)), False
         self.dmg = self.hits = 0
         self.sdmg = self.sheal = self.fheal = 0          # 내가 입는 피해 / 내 회복 / 상대 회복
-        self.events = []
-        self.safe = None
+        self.events, self.safe = [], None
         # 피하는 쪽
         self.dx, self.dy = SIZE / 2, SIZE * 0.68
         self.dvx = self.dvy = 0.0
@@ -225,7 +197,6 @@ class Arena:
     def _finish(self):
         if not self.done:
             self.done = True
-            self.end_t = self.t
 
     def _move_defender(self, dt):
         ix, iy, tw = self.in_x, self.in_y, self.tw
@@ -272,17 +243,11 @@ class Arena:
     def _touch(self, x, y, r):
         return (x - self.dx) ** 2 + (y - self.dy) ** 2 <= (r + self.dr) ** 2
 
-    def _edge_spawn(self):
-        return edge_point(self.rng)
-
     # ── 포탑 (shoot / cone / beam 공용) ──
     def _init_turret(self, v=150):
-        self.tur_u = self.rng.uniform(0, 4 * SIZE)
-        self.tur_v = self.spec.get("turret", v)
+        self.tur_u, self.tur_v = self.rng.uniform(0, 4 * SIZE), self.spec.get("turret", v)
         self.tx, self.ty = perimeter_point(self.tur_u)
-        self.cd_max = self.spec.get("cd", 0.75)
-        self.cd = 0.6
-        self.per_hit = self.spec.get("per_hit", 1)
+        self.cd_max, self.cd, self.per_hit = self.spec.get("cd", 0.75), 0.6, self.spec.get("per_hit", 1)
 
     def _turret(self, dt):
         self.tur_u += self.tur_v * dt
@@ -304,12 +269,10 @@ class Arena:
     def _init_shoot(self):
         s = self.spec
         self._init_turret(150)
-        self.shots_left = int(s.get("shots", 3))
-        self.bspeed = s.get("speed", 320) * self.pspeed
+        self.shots_left, self.bspeed = int(s.get("shots", 3)), s.get("speed", 320) * self.pspeed
         self.br = s.get("r", 7)
         self.bullets = []              # [x, y, vx, vy, 종류(0 일반 / 1 초록(회복) / 2 관통)]
-        self.fired = 0
-        self.heal_amt = s.get("heal", 2)
+        self.fired, self.heal_amt = 0, s.get("heal", 2)
         if self.mode == "shield":
             self.sh_max = int(s.get("sh_hp", 4))
             self.sh_hp, self.sh_off = self.sh_max, 0.0
@@ -318,15 +281,13 @@ class Arena:
 
     def _shield_block(self, b):
         a = math.atan2(b[1] - self.dy, b[0] - self.dx)
-        return (math.hypot(b[0] - self.dx, b[1] - self.dy) <= self.shr + self.br
-                and abs(adiff(a, self.sh_ang)) <= self.shw)
+        return (math.hypot(b[0] - self.dx, b[1] - self.dy) <= self.shr + self.br and abs(adiff(a, self.sh_ang)) <= self.shw)
 
     def _step_shoot(self, dt):
         s, mode = self.spec, self.mode
         self._turret(dt)
         if mode == "shield":
-            self.sh_ang = math.atan2(self.dmy - self.dy, self.dmx - self.dx)
-            self.sh_off = max(0.0, self.sh_off - dt)
+            self.sh_ang, self.sh_off = math.atan2(self.dmy - self.dy, self.dmx - self.dx), max(0.0, self.sh_off - dt)
             self.dslow = s.get("slow", 0.7) if self.sh_off <= 0 else 1.0
         if self.clicks and self.shots_left > 0 and self.cd <= 0:
             ax, ay = self.aim_dir()
@@ -359,8 +320,7 @@ class Arena:
                     if mode == "knock":
                         L = math.hypot(b[2], b[3]) or 1.0
                         p = s.get("push", 560)
-                        self.kv = [b[2] / L * p, b[3] / L * p]
-                        self.kwin = 1.0
+                        self.kv, self.kwin = [b[2] / L * p, b[3] / L * p], 1.0
                     self._hit(self.per_hit)
                 continue
             if -30 <= b[0] <= SIZE + 30 and -30 <= b[1] <= SIZE + 30:
@@ -372,12 +332,8 @@ class Arena:
     # ── swarm: 떼 ──
     def _init_swarm(self):
         s = self.spec
-        self.ants_total = int(s.get("ants", 6))
-        self.ants_spawned = 0
-        self.per_hit = s.get("per_hit", 1)
-        self.aspeed = s.get("speed", 100) * self.pspeed
-        self.ar = s.get("r", 6)
-        self.spawn_t = s.get("spawn_t", 1.6)
+        self.ants_total, self.ants_spawned, self.per_hit = int(s.get("ants", 6)), 0, s.get("per_hit", 1)
+        self.aspeed, self.ar, self.spawn_t = s.get("speed", 100) * self.pspeed, s.get("r", 6), s.get("spawn_t", 1.6)
         self.ants = []
 
     def _step_swarm(self, dt):
@@ -405,18 +361,12 @@ class Arena:
     # ── zone: 범위 폭격 ──
     def _init_zone(self):
         s = self.spec
-        self.z_total = int(s.get("count", 1))
-        self.z_placed = 0
+        self.z_total, self.z_placed = int(s.get("count", 1)), 0
         self.z_r = s.get("radius", 60) * (1 + self.mods["atk"])
         self.z_warn = s.get("warn", 0.8) * (1 + self.mods["proj_slow"])   # 시간의 틈: 경고 시간이 길어짐
-        self.z_charge = s.get("charge", 2.0)
-        self.z_dc = s.get("dc", 3)
-        self.z_de = s.get("de", self.z_dc)
-        self.z_linger = s.get("linger", 0.0)
-        self.z_tick = s.get("tick", 0.5)
-        self.z_tickdmg = s.get("tickdmg", 1)
-        self.z_cd = 0.0
-        self.z_ctimer = 0.0
+        self.z_charge, self.z_dc = s.get("charge", 2.0), s.get("dc", 3)
+        self.z_de, self.z_linger, self.z_tick = s.get("de", self.z_dc), s.get("linger", 0.0), s.get("tick", 0.5)
+        self.z_tickdmg, self.z_cd, self.z_ctimer = s.get("tickdmg", 1), 0.0, 0.0
         self.zones = []     # [x, y, r, state, t, tick_t]  state: 0 경고 / 1 폭발 / 2 안개
 
     def _step_zone(self, dt):
@@ -426,8 +376,7 @@ class Arena:
             if self.z_cd <= 0 and (self.clicks or self.z_ctimer >= self.z_charge):
                 self.zones.append([self.mx, self.my, self.z_r, 0, 0.0, 0.0])
                 self.z_placed += 1
-                self.z_ctimer = 0.0
-                self.z_cd = 0.45
+                self.z_ctimer, self.z_cd = 0.0, 0.45
                 self.events.append("fire")
         keep = []
         for z in self.zones:
@@ -462,11 +411,9 @@ class Arena:
     # ── rain: 하늘에서 쏟아짐 (화살비 / 불비 / 운석우) ──
     def _init_rain(self):
         s = self.spec
-        self.volleys = int(s.get("volleys", 3))
-        self.v_n = int(s.get("n", 6))
+        self.volleys, self.v_n = int(s.get("volleys", 3)), int(s.get("n", 6))
         self.spread = s.get("spread", 90) * (1 + self.mods["atk"] * 0.5)
-        self.fall = s.get("fall", 0.8) * (1 + self.mods["proj_slow"])
-        self.rr = s.get("r", 22)
+        self.fall, self.rr = s.get("fall", 0.8) * (1 + self.mods["proj_slow"]), s.get("r", 22)
         self.per_hit = s.get("per_hit", 1)
         self.slant = s.get("slant", 0.0)             # 0=수직으로 / 양수=비스듬히 (운석)
         self.burn = s.get("burn", 0.0)               # 착탄 뒤 불길이 남는 시간
@@ -525,11 +472,9 @@ class Arena:
     def _init_cone(self):
         s = self.spec
         self._init_turret(110)
-        self.shots_left = int(s.get("shots", 2))
-        self.half = s.get("half", 0.42)
+        self.shots_left, self.half = int(s.get("shots", 2)), s.get("half", 0.42)
         self.clen = s.get("length", 340) * (1 + self.mods["atk"] * 0.3)
-        self.warn = s.get("warn", 0.75) * (1 + self.mods["proj_slow"])
-        self.de = s.get("de", self.per_hit)
+        self.warn, self.de = s.get("warn", 0.75) * (1 + self.mods["proj_slow"]), s.get("de", self.per_hit)
         self.cones = []          # [x, y, 각도, 시간, 상태 0 경고 / 1 폭발]
 
     def _step_cone(self, dt):
@@ -562,11 +507,8 @@ class Arena:
     def _init_beam(self):
         s = self.spec
         self._init_turret(70)
-        self.beams_left = int(s.get("shots", 2))
-        self.bdur = s.get("dur", 2.0)
-        self.bw = s.get("width", 16)
-        self.bwarn = s.get("warn", 0.8) * (1 + self.mods["proj_slow"])
-        self.swing = s.get("swing", 0.5) * self.pspeed
+        self.beams_left, self.bdur, self.bw = int(s.get("shots", 2)), s.get("dur", 2.0), s.get("width", 16)
+        self.bwarn, self.swing = s.get("warn", 0.8) * (1 + self.mods["proj_slow"]), s.get("swing", 0.5) * self.pspeed
         self.btick = s.get("tick", 0.25)
         self.beam = None         # [x, y, 각도, 상태 0 충전 / 1 발사, 시간, 틱]
 
@@ -589,19 +531,15 @@ class Arena:
                     b[5] = 0.0
                     self._hit(self.per_hit, "hit")
                 if b[4] >= self.bdur:
-                    self.beam = None
-                    self.cd = self.cd_max
+                    self.beam, self.cd = None, self.cd_max
         if self.beams_left <= 0 and self.beam is None:
             self._finish()
 
     # ── chase: 추격 칼날 ──
     def _init_chase(self):
         s = self.spec
-        self.per_hit = s.get("per_hit", 2)
-        self.c_speed = s.get("speed", 150) * self.pspeed
-        self.c_r = s.get("r", 14)
-        self.c_cd_max = s.get("cd", 0.9)
-        self.c_cd = 0.0
+        self.per_hit, self.c_speed, self.c_r = s.get("per_hit", 2), s.get("speed", 150) * self.pspeed, s.get("r", 14)
+        self.c_cd_max, self.c_cd = s.get("cd", 0.9), 0.0
         self.cx, self.cy = edge_point(self.rng)
         self.cvx = self.cvy = 0.0
 
@@ -612,8 +550,7 @@ class Arena:
         acc = 650.0 * dt
         self.cvx += clamp(wx - self.cvx, -acc, acc)
         self.cvy += clamp(wy - self.cvy, -acc, acc)
-        self.cx = clamp(self.cx + self.cvx * dt, 0, SIZE)
-        self.cy = clamp(self.cy + self.cvy * dt, 0, SIZE)
+        self.cx, self.cy = clamp(self.cx + self.cvx * dt, 0, SIZE), clamp(self.cy + self.cvy * dt, 0, SIZE)
         self.c_cd -= dt
         if self.c_cd <= 0 and self._touch(self.cx, self.cy, self.c_r):
             self._hit(self.per_hit)
@@ -623,13 +560,9 @@ class Arena:
     def _init_orbit(self):
         s = self.spec
         self.ox, self.oy, self.ovx, self.ovy = SIZE / 2, SIZE * 0.2, 0.0, 0.0
-        self.o_speed = s.get("speed", 170) * self.pspeed
-        self.blen = s.get("blade", 90) * (1 + self.mods["atk"] * 0.3)
-        self.spin = s.get("spin", 5.0) * math.sqrt(self.pspeed)
-        self.nb = int(s.get("blades", 1))
-        self.bw = s.get("r", 9)
-        self.body = s.get("body", 15)
-        self.per_hit = s.get("per_hit", 2)
+        self.o_speed, self.blen = s.get("speed", 170) * self.pspeed, s.get("blade", 90) * (1 + self.mods["atk"] * 0.3)
+        self.spin, self.nb = s.get("spin", 5.0) * math.sqrt(self.pspeed), int(s.get("blades", 1))
+        self.bw, self.body, self.per_hit = s.get("r", 9), s.get("body", 15), s.get("per_hit", 2)
         self.o_cd_max = s.get("cd", 0.55)
         self.th, self.dirn, self.boost, self.bcd, self.o_cd = 0.0, 1, 0.0, 0.0, 0.0
 
@@ -645,8 +578,7 @@ class Arena:
         acc = 900.0 * dt
         self.ovx += clamp(dx / d * v - self.ovx, -acc, acc)
         self.ovy += clamp(dy / d * v - self.ovy, -acc, acc)
-        self.ox = clamp(self.ox + self.ovx * dt, 0, SIZE)
-        self.oy = clamp(self.oy + self.ovy * dt, 0, SIZE)
+        self.ox, self.oy = clamp(self.ox + self.ovx * dt, 0, SIZE), clamp(self.oy + self.ovy * dt, 0, SIZE)
         self.bcd -= dt
         if self.clicks and self.bcd <= 0:
             self.dirn, self.boost, self.bcd = -self.dirn, 0.7, 0.9
@@ -665,19 +597,13 @@ class Arena:
     def _init_duel(self):
         s = self.spec
         self.ax, self.ay, self.af = SIZE / 2, SIZE * 0.25, math.pi / 2
-        self.df = -math.pi / 2
-        self.reach = s.get("reach", 62)
-        self.wind = s.get("wind", 0.16)
-        self.rec = s.get("rec", 0.95)
-        self.stun_t = s.get("stun", 1.0)
-        self.arc = s.get("arc", 0.95)
-        self.a_speed = s.get("a_speed", 175) * self.pspeed
-        self.per_hit = s.get("per_hit", 3)
+        self.df, self.reach, self.wind = -math.pi / 2, s.get("reach", 62), s.get("wind", 0.16)
+        self.rec, self.stun_t, self.arc = s.get("rec", 0.95), s.get("stun", 1.0), s.get("arc", 0.95)
+        self.a_speed, self.per_hit = s.get("a_speed", 175) * self.pspeed, s.get("per_hit", 3)
         self.back = s.get("back", 5)
         self.a_st, self.a_t, self.a_lock, self.a_stun = "idle", 0.0, 0.0, 0.0     # idle / wind / rec / stun
         self.d_st, self.d_t, self.d_lock, self.d_stun = "idle", 0.0, 0.0, 0.0
-        self.a_kv = [0.0, 0.0]
-        self.time = float(s.get("time", 10.0))
+        self.a_kv, self.time = [0.0, 0.0], float(s.get("time", 10.0))
 
     def _strike_hits(self, ox, oy, lock, tx, ty, tr):
         d = math.hypot(tx - ox, ty - oy)
@@ -700,8 +626,7 @@ class Arena:
         self.a_kv[0] *= math.exp(-5 * dt)
         self.a_kv[1] *= math.exp(-5 * dt)
         self.ax = clamp(self.ax + self.a_kv[0] * dt, 10, SIZE - 10)
-        self.ay = clamp(self.ay + self.a_kv[1] * dt, 10, SIZE - 10)
-        self.dslow = 0.3 if self.d_st == "wind" else 1.0
+        self.ay, self.dslow = clamp(self.ay + self.a_kv[1] * dt, 10, SIZE - 10), 0.3 if self.d_st == "wind" else 1.0
         # 베기 시작
         if self.clicks and self.a_st == "idle":
             self.a_st, self.a_t, self.a_lock = "wind", 0.0, self.af
@@ -757,11 +682,8 @@ class Arena:
     def _init_vortex(self):
         s = self.spec
         self.hx, self.hy = SIZE / 2, SIZE * 0.3
-        self.h_speed = s.get("speed", 85) * self.pspeed
-        self.pull = s.get("pull", 150) * (1 + self.mods["atk"] * 0.3)
-        self.rp = s.get("r_pull", 175)
-        self.rc = s.get("r_core", 24)
-        self.tick = s.get("tick", 0.45)
+        self.h_speed, self.pull = s.get("speed", 85) * self.pspeed, s.get("pull", 150) * (1 + self.mods["atk"] * 0.3)
+        self.rp, self.rc, self.tick = s.get("r_pull", 175), s.get("r_core", 24), s.get("tick", 0.45)
         self.per_hit = s.get("per_hit", 1)
         self.boom = s.get("boom", 0)                  # 마지막에 터지는 폭발 반지름 (0이면 없음)
         self.boom_dmg = s.get("boom_dmg", 4)
@@ -771,8 +693,7 @@ class Arena:
         dx, dy = self.mx - self.hx, self.my - self.hy
         d = math.hypot(dx, dy) or 1.0
         v = min(self.h_speed, d * 4)
-        self.hx = clamp(self.hx + dx / d * v * dt, 0, SIZE)
-        self.hy = clamp(self.hy + dy / d * v * dt, 0, SIZE)
+        self.hx, self.hy = clamp(self.hx + dx / d * v * dt, 0, SIZE), clamp(self.hy + dy / d * v * dt, 0, SIZE)
         gx, gy = self.hx - self.dx, self.hy - self.dy
         g = math.hypot(gx, gy) or 1.0
         f = self.pull * (1 - g / self.rp) if g < self.rp else 0.0
@@ -794,10 +715,8 @@ class Arena:
         s = self.spec
         self.w_total = int(s.get("portals", 3))
         self.w_placed, self.w_cd = 0, 0.0
-        self.pr = s.get("r", 44)
-        self.er = s.get("exit_r", 62)
-        self.wwarn = s.get("warn", 0.9) * (1 + self.mods["proj_slow"])
-        self.life = s.get("life", 6.0)
+        self.pr, self.er = s.get("r", 44), s.get("exit_r", 62)
+        self.wwarn, self.life = s.get("warn", 0.9) * (1 + self.mods["proj_slow"]), s.get("life", 6.0)
         self.per_hit = s.get("per_hit", 3)
         self.portals = []        # [입구x, 입구y, 출구x, 출구y, 나이]
         self.blasts = []         # [x, y, 시간]
@@ -844,11 +763,9 @@ class Arena:
     def _init_grid(self):
         s = self.spec
         self.gn = int(s.get("n", 3))
-        self.cs = SIZE / self.gn
-        self.g_total = int(s.get("shots", 6))
+        self.cs, self.g_total = SIZE / self.gn, int(s.get("shots", 6))
         self.g_placed, self.g_cd = 0, 0.0
-        self.gwarn = s.get("warn", 1.0) * (1 + self.mods["proj_slow"])
-        self.per_hit = s.get("per_hit", 2)
+        self.gwarn, self.per_hit = s.get("warn", 1.0) * (1 + self.mods["proj_slow"]), s.get("per_hit", 2)
         self.auto = s.get("auto", 0)                  # >0: 조종 없이 한꺼번에 N칸만 남기고 전부 심판 (피하기 힘든 공격)
         self.waves = int(s.get("waves", 2))
         self.wave_t, self.waves_done = 0.6, 0
@@ -898,11 +815,8 @@ class Arena:
     def _init_channel(self):
         s = self.spec
         self.chx, self.chy = SIZE / 2, SIZE * 0.3
-        self.chr = s.get("r", 62) * (1 + self.mods["atk"] * 0.3)
-        self.ch_speed = s.get("speed", 95) * self.pspeed
-        self.need = s.get("need", 6.0)
-        self.ch_heal = s.get("heal", 8)
-        self.drain = s.get("drain", 1.8)
+        self.chr, self.ch_speed = s.get("r", 62) * (1 + self.mods["atk"] * 0.3), s.get("speed", 95) * self.pspeed
+        self.need, self.ch_heal, self.drain = s.get("need", 6.0), s.get("heal", 8), s.get("drain", 1.8)
         self.tickdmg = s.get("tick", 0)
         self.prog, self.tk, self.inside = 0.0, 0.0, False
         self.blink_cd_max, self.blink_cd = s.get("blink", 2.0), 0.0
@@ -937,8 +851,7 @@ class Arena:
     def _init_bounce(self):
         s = self.spec
         n = int(s.get("n", 2))
-        self.per_hit = s.get("per_hit", 1)
-        self.dice_r = s.get("r", 11)
+        self.per_hit, self.dice_r = s.get("per_hit", 1), s.get("r", 11)
         sp = s.get("speed", 200) * self.pspeed
         self.dice = []
         for _ in range(n):
@@ -947,7 +860,6 @@ class Arena:
                               math.cos(a) * sp, math.sin(a) * sp, 0.0])
         if not self.dice:
             self.done = True
-            self.end_t = 0.0
 
     def _step_bounce(self, dt):
         for d in self.dice:
@@ -969,17 +881,13 @@ class Arena:
         s = self.spec
         self.n = int(s.get("n", 2))
         k = int(s.get("k", 1))
-        self.danger = set(self.rng.sample(range(self.n), min(k, self.n)))
-        self.picked = None
-        self.reveal_t = None
+        self.danger, self.picked, self.reveal_t = set(self.rng.sample(range(self.n), min(k, self.n))), None, None
         self.time = float(s.get("time", 7.0))
 
     def pick(self, i):
         if self.mode != "pick" or self.picked is not None or not (0 <= i < self.n):
             return
-        self.picked = i
-        self.safe = i not in self.danger
-        self.reveal_t = self.t
+        self.picked, self.safe, self.reveal_t = i, i not in self.danger, self.t
         self.events.append("hit" if not self.safe else "heal")
 
     def _step_pick(self, dt):
@@ -1079,12 +987,8 @@ class AIDefender:
     DIRS = [(0, 0)] + [(math.cos(a * math.pi / 4), math.sin(a * math.pi / 4)) for a in range(8)]
 
     def __init__(self, arena, skill=0.6, seed=1):
-        self.a = arena
-        self.skill = skill
-        self.rng = random.Random(seed)
-        self.cool = 0.0
-        self.react = 0.30 - 0.22 * skill
-        self.cur = (0, 0)
+        self.a, self.skill, self.rng, self.cool = arena, skill, random.Random(seed), 0.0
+        self.react, self.cur = 0.30 - 0.22 * skill, (0, 0)
 
     def _threat(self, px, py, tau):
         a = self.a
@@ -1247,10 +1151,7 @@ class AIAttacker:
     """상대를 노리는 공격 AI. skill 0~1 (높을수록 정확하고 예측 사격을 해요)"""
 
     def __init__(self, arena, skill=0.6, seed=2):
-        self.a = arena
-        self.skill = skill
-        self.rng = random.Random(seed)
-        self.think = 0.0
+        self.a, self.skill, self.rng, self.think = arena, skill, random.Random(seed), 0.0
 
     def _target(self, lead):
         a = self.a
