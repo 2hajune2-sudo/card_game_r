@@ -1,1183 +1,1819 @@
-#!/usr/bin/env python3
-"""한 장 승부 - 턴제 카드 배틀의 규칙 엔진 + 터미널(AI 대전) 버전
-
-실행:
-    python cardgame.py                  메뉴
-    python cardgame.py ai               바로 AI 대전
-    python cardgame.py --no-color       색 끄기
-(온라인 대전은 창 버전 cardgame_gui.py + relay_server.py 로 해요)
-
-카드와 규칙 숫자는 cards.json 에서 바꿉니다. 새 효과를 만들려면
-OPS(문구)와 Game.run_fx(동작)에 추가하세요.
-표준 라이브러리만 사용하므로 별도 설치가 필요 없습니다.
-"""
-import json
-import os
-import random
-import sys
-import time
-
-HERE = os.path.dirname(os.path.abspath(__file__))
-DECK_FILE = os.path.join(HERE, "deck.json")
-
-
-# ----------------------------------------------------------------------
-# 효과 문구
-# ----------------------------------------------------------------------
-def fx_text(fx):
-    return ", ".join(OPS[e["op"]](e) for e in fx)
-
-
-def _discard_text(e):
-    return "상대 손패 전부 버리기" if e["v"] >= 99 else f"상대 손패 {e['v']}장 버리기"
-
-
-def _dmgif_text(e):
-    who = "내" if e["who"] == "me" else "상대"
-    cmp_ = "이하" if e["cmp"] == "le" else "이상"
-    return f"상대에게 {e['v']} 피해 ({who} 체력 {e['t']} {cmp_}면 +{e['b']})"
-
-
-def _chance_text(e):
-    win = fx_text(e["win"])
-    lose = fx_text(e.get("lose", []))
-    if lose:
-        return f"{e['p']}% 확률로 [{win}], 아니면 [{lose}]"
-    return f"{e['p']}% 확률로 [{win}]"
-
-
-def _copy_text(kind, e):
-    b, v = e.get("b", 0), e["v"]
-    if kind == "피해":
-        base = f"상대에게 {b} 피해, " if b else ""
-        return f"{base}손패의 다른 같은 카드 1장당 {'+' if b else ''}{v} 피해 (이 카드 포함하지 않음)"
-    base = f"체력 {b} 회복, " if b else ""
-    return f"{base}손패의 다른 같은 카드 1장당 {'+' if b else ''}체력 {v} 회복 (이 카드 포함하지 않음)"
-
-
-# 효과 문구: 효과 dict -> 설명. 새 효과를 만들면 여기와 Game.run_fx 에 추가하세요.
-OPS = {
-    "dmg":          lambda e: f"상대에게 {e['v']} 피해",
-    "selfdmg":      lambda e: f"나에게 {e['v']} 피해",
-    "heal":         lambda e: f"체력 {e['v']} 회복",
-    "draw":         lambda e: f"카드 {e['v']}장 뽑기",
-    "discard":      _discard_text,
-    "discardSelf":  lambda e: f"내 손패 {e['v']}장 버리기",
-    "breakInstall": lambda e: f"상대 설치 {e['v']}개 파괴",
-    "steal":        lambda e: f"상대 손패 {e['v']}장 훔치기",
-    "poison":       lambda e: f"상대를 {e['v']}턴 중독 (턴 시작 1 피해)",
-    "shield":       lambda e: f"보호막 {e['v']} (다음 피해 흡수)",
-    "swapHp":       lambda e: "상대와 체력 맞바꾸기",
-    "handSwap":     lambda e: "상대와 손패 통째로 맞바꾸기",
-    "timeStop":     lambda e: "상대의 다음 턴 건너뛰기",
-    "dmgPerCopy":   lambda e: _copy_text("피해", e),
-    "healPerCopy":  lambda e: _copy_text("회복", e),
-    "dmgIf":        _dmgif_text,
-    "dmgRand":      lambda e: f"상대에게 {e['v']}~{e['b']} 피해 (무작위)",
-    "healRand":     lambda e: f"체력 {e['v']}~{e['b']} 회복 (무작위)",
-    "dmgPerInstall":  lambda e: f"내 설치 카드 1장당 상대에게 {e['v']} 피해",
-    "healPerInstall": lambda e: f"내 설치 카드 1장당 체력 {e['v']} 회복",
-    "chance":       _chance_text,
-    "discardCopies": lambda e: "손패의 같은 카드를 모두 소멸",
-    "breakAll":     lambda e: "상대의 설치 카드를 전부 파괴",
-    "healMissing":  lambda e: f"잃은 체력의 절반을 회복 (최소 {e['v']})",
-    "mirror":       lambda e: "상대가 마지막으로 쓴 즉발 카드의 효과를 그대로 사용",
-    "foe":          lambda e: f"상대가: [{fx_text(e['fx'])}]",
+{
+ "_help": {
+  "rarity": "common | rare | hero | legend",
+  "kind": "instant(즉발: 사용하면 턴 종료) | install(설치: 턴 사용 안 함, 턴당 1장)",
+  "fx": "효과 목록. dmg selfdmg heal draw discard discardSelf breakInstall steal poison shield swapHp handSwap timeStop / dmgPerCopy healPerCopy(손패의 '다른' 같은 카드 1장당 v, 기본값 b) / dmgPerInstall healPerInstall(내 설치 수) / dmgRand healRand(v~b 무작위) / dmgIf / chance / 레전드용: breakAll healMissing mirror / discardCopies(손패의 같은 카드 모두 소멸)",
+  "chance": "{op:chance, p:확률(%), win:[효과...], lose:[효과...]}  (lose 생략 가능)",
+  "dmgIf": "{op:dmgIf, v:기본피해, b:추가피해, who:me|op, cmp:le|ge, t:기준체력}",
+  "on": "(설치만) play | turnStart | turnEnd | hit | expire - fx가 발동하는 시점. expire = 설치 후 duration턴 뒤 한 번 발동하고 사라짐",
+  "need": "(설치만) 내 설치 카드가 이 장수 이상일 때만 fx 발동 (이 카드 포함)",
+  "duration": "(설치만) 지속 턴. 0 또는 생략 = 영구 (expire 는 필수)",
+  "mods": "(설치만) dealBonus: 내 즉발 피해 증가 / takeReduce: 받는 피해 감소(음수=증가) / surviveOnce: 체력 0일 때 1로 버티고 사라짐",
+  "max_copies": "(config) 같은 카드를 덱에 넣을 수 있는 최대 장수",
+  "icon": "(선택) 카드 그림 자리에 보일 이모지. 없으면 효과에 맞춰 자동 선택",
+  "arena": "(공격 카드) 쓰면 검은 아레나가 열려요. mode: shoot swarm zone chase bounce pick. 숫자들은 arena.py 의 모드별 설명 참고. max=최대 피해, ev=AI가 쓰는 기대 피해",
+  "text": "(선택) 카드 설명을 직접 적어요. 공격 카드는 필수",
+  "fx_hit": "(공격 카드) 한 번이라도 맞혔을 때만 발동하는 효과",
+  "barrier": "(설치) 받는 피해를 이 수치만큼 막아 주고, 다 막으면 사라져요 (지속 턴이 지나도 사라짐)",
+  "mods(필드)": "dodge: 피할 때 이동속도 증가 / shrink: 피할 때 몸 크기 감소 / atk: 공격 투사체 속도·폭발 범위 증가 / foeSlow: 상대가 피할 때 이동속도 감소 / projSlow: 상대 투사체 속도 감소",
+  "foe": "{op:foe, fx:[...]} 안의 효과를 '상대가 쓴 것처럼' 적용 (예: 상대 회복)"
+ },
+ "config": {
+  "deck_min": 25,
+  "deck_max": 30,
+  "rarity_limit": {
+   "common": null,
+   "rare": 10,
+   "hero": 6,
+   "legend": 2
+  },
+  "start_hp": 30,
+  "max_hp": 30,
+  "start_hand": 3,
+  "draw_per_turn": 1,
+  "first_player_skips_draw": true,
+  "refill_draw": 2,
+  "hand_limit": 10,
+  "field_max": 5,
+  "max_copies": 5
+ },
+ "cards": [
+  {
+   "id": "c01",
+   "name": "돌멩이",
+   "rarity": "common",
+   "kind": "instant",
+   "fx": [],
+   "arena": {
+    "mode": "shoot",
+    "shots": 8,
+    "speed": 420,
+    "cd": 0.32,
+    "r": 11,
+    "per_hit": 1,
+    "time": 9,
+    "max": 4,
+    "g": "🪨",
+    "ev": 0.82
+   },
+   "text": "[총알 조준] 조준선으로 돌 8개를 던져요 — 맞을 때마다 1 피해 (최대 4)"
+  },
+  {
+   "id": "c02",
+   "name": "붕대",
+   "rarity": "common",
+   "kind": "instant",
+   "fx": [
+    {
+     "op": "heal",
+     "v": 2
+    }
+   ]
+  },
+  {
+   "id": "c03",
+   "name": "개미 떼",
+   "rarity": "common",
+   "kind": "instant",
+   "fx": [
+    {
+     "op": "discardCopies"
+    }
+   ],
+   "arena": {
+    "mode": "swarm",
+    "ants_base": 13,
+    "ants_per_copy": 5,
+    "speed": 130,
+    "per_hit": 1,
+    "max_base": 4,
+    "max_per_copy": 3,
+    "ev_per": 0.8,
+    "g": "🐜",
+    "ev": 1.1
+   },
+   "text": "[개미 떼 유인] 닿는 만큼 1 피해 — 손패의 다른 개미 떼 1장당 개미 +5마리 (자신 제외), 쓰면 손패의 개미 떼가 모두 사라져요"
+  },
+  {
+   "id": "c04",
+   "name": "들풀 묶음",
+   "rarity": "common",
+   "kind": "instant",
+   "fx": [
+    {
+     "op": "heal",
+     "v": 1
+    },
+    {
+     "op": "shield",
+     "v": 1
+    }
+   ]
+  },
+  {
+   "id": "c05",
+   "name": "정찰병",
+   "rarity": "common",
+   "kind": "instant",
+   "fx": [
+    {
+     "op": "draw",
+     "v": 2
+    }
+   ]
+  },
+  {
+   "id": "c06",
+   "name": "가시 울타리",
+   "rarity": "common",
+   "kind": "install",
+   "on": "hit",
+   "duration": 3,
+   "fx": [
+    {
+     "op": "dmg",
+     "v": 1
+    }
+   ]
+  },
+  {
+   "id": "c07",
+   "name": "모닥불",
+   "rarity": "common",
+   "kind": "install",
+   "on": "turnStart",
+   "duration": 3,
+   "fx": [
+    {
+     "op": "heal",
+     "v": 1
+    }
+   ]
+  },
+  {
+   "id": "c08",
+   "name": "나무 방패",
+   "rarity": "common",
+   "kind": "install",
+   "duration": 2,
+   "fx": [],
+   "barrier": 3
+  },
+  {
+   "id": "c09",
+   "name": "주사위 던지기",
+   "rarity": "common",
+   "kind": "instant",
+   "fx": [],
+   "arena": {
+    "mode": "bounce",
+    "n_rand": [
+     1,
+     3
+    ],
+    "speed": 440,
+    "r": 26,
+    "per_hit": 1,
+    "cd": 0.6,
+    "time": 9,
+    "g": "🎲",
+    "ev": 1.06
+   },
+   "text": "[주사위 난무] 주사위 1~3개가 튕겨 다녀요 — 닿을 때마다 1 피해"
+  },
+  {
+   "id": "c10",
+   "name": "씨앗 주머니",
+   "rarity": "common",
+   "kind": "install",
+   "on": "expire",
+   "duration": 2,
+   "fx": [
+    {
+     "op": "heal",
+     "v": 2
+    }
+   ]
+  },
+  {
+   "id": "c11",
+   "name": "도화선",
+   "rarity": "common",
+   "kind": "install",
+   "on": "expire",
+   "duration": 2,
+   "fx": [
+    {
+     "op": "dmg",
+     "v": 2
+    }
+   ]
+  },
+  {
+   "id": "c12",
+   "name": "가벼운 신발",
+   "rarity": "common",
+   "kind": "install",
+   "duration": 3,
+   "fx": [],
+   "mods": {
+    "dodge": 0.2
+   },
+   "icon": "👟"
+  },
+  {
+   "id": "c13",
+   "name": "화살비",
+   "rarity": "common",
+   "kind": "instant",
+   "fx": [],
+   "arena": {
+    "mode": "rain",
+    "g": "arrow",
+    "volleys": 4,
+    "n": 14,
+    "spread": 95,
+    "fall": 0.5,
+    "r": 30,
+    "per_hit": 1,
+    "max": 6,
+    "help": [
+     "화살비",
+     "마우스로 떨어뜨릴 지점을 정하고 클릭! 위에서 화살이 쏟아져요. 바닥의 표식이 착탄 지점이에요.",
+     "바닥에 생기는 표식(착탄 지점)을 보고 벗어나세요. 화살이 떨어지는 동안 움직이면 돼요."
+    ],
+    "ev": 0.8
+   },
+   "text": "[화살비] 마우스로 정한 곳에 위에서 화살 14발씩 4번 쏟아져요 — 바닥 표식에 맞으면 1 피해 (최대 6)"
+  },
+  {
+   "id": "c14",
+   "name": "벌 떼",
+   "rarity": "common",
+   "kind": "instant",
+   "fx": [],
+   "arena": {
+    "mode": "swarm",
+    "ants_base": 12,
+    "ants_per_copy": 0,
+    "speed": 130,
+    "per_hit": 1,
+    "max_base": 5,
+    "max_per_copy": 0,
+    "g": "🐝",
+    "ev": 1.1
+   },
+   "text": "[벌 떼 유인] 벌 12마리가 몰려와요 — 닿는 만큼 1 피해 (최대 5)"
+  },
+  {
+   "id": "c15",
+   "name": "불씨 비",
+   "rarity": "common",
+   "kind": "instant",
+   "fx": [],
+   "arena": {
+    "mode": "rain",
+    "g": "🔥",
+    "volleys": 4,
+    "n": 9,
+    "spread": 80,
+    "fall": 0.7,
+    "r": 34,
+    "burn": 2.2,
+    "per_hit": 1,
+    "max": 6,
+    "ev": 0.96
+   },
+   "text": "[불비] 위에서 불덩이 9개씩 4번 쏟아지고 땅에 불길이 남아요 — 맞으면 1 피해, 불길 위에 서 있으면 계속 피해 (최대 6)"
+  },
+  {
+   "id": "c16",
+   "name": "굴러온 바위",
+   "rarity": "common",
+   "kind": "instant",
+   "fx": [],
+   "arena": {
+    "mode": "bounce",
+    "n_rand": [
+     1,
+     2
+    ],
+    "speed": 360,
+    "r": 30,
+    "per_hit": 2,
+    "cd": 0.9,
+    "time": 9,
+    "max": 4,
+    "g": "🪨",
+    "ev": 1.74
+   },
+   "text": "[바위 구르기] 큰 바위 1~2개가 튕겨 다녀요 — 닿을 때마다 2 피해 (최대 4)"
+  },
+  {
+   "id": "c17",
+   "name": "맞서는 방패",
+   "rarity": "common",
+   "kind": "instant",
+   "fx": [],
+   "arena": {
+    "mode": "shield",
+    "g": "arrow",
+    "shots": 9,
+    "speed": 480,
+    "cd": 0.3,
+    "r": 9,
+    "per_hit": 2,
+    "sh_hp": 2,
+    "max": 6,
+    "pierce_every": 3,
+    "ev": 1.32
+   },
+   "text": "[발사 vs 방패] 화살 9발을 쏴요 — 상대는 방패로 막지만 2번 막으면 깨져요. 3발마다 방패를 뚫는 보라색 화살! 맞을 때마다 2 피해 (최대 6)"
+  },
+  {
+   "id": "c18",
+   "name": "거미줄 덫",
+   "rarity": "common",
+   "kind": "instant",
+   "fx": [],
+   "arena": {
+    "mode": "swarm",
+    "g": "🕷",
+    "ants": 6,
+    "speed": 105,
+    "per_hit": 1,
+    "twist": "slow",
+    "max": 4,
+    "ev": 1.92
+   },
+   "text": "[끈적한 거미줄] 거미 6마리가 몰려와요 — 닿는 만큼 1 피해 (최대 4), 그동안 상대는 몸이 무거워져 느려져요"
+  },
+  {
+   "id": "c19",
+   "name": "얼음 투척",
+   "rarity": "common",
+   "kind": "instant",
+   "fx": [],
+   "arena": {
+    "mode": "shoot",
+    "g": "❄",
+    "shots": 6,
+    "speed": 380,
+    "cd": 0.32,
+    "r": 11,
+    "per_hit": 1,
+    "twist": "ice",
+    "max": 4,
+    "ev": 1.43
+   },
+   "text": "[빙판] 얼음 덩이 6발을 던져요 — 맞으면 1 피해 (최대 4), 필드가 얼음판이라 상대가 미끄러져요"
+  },
+  {
+   "id": "c20",
+   "name": "독이 든 사과",
+   "rarity": "common",
+   "kind": "instant",
+   "fx": [],
+   "arena": {
+    "mode": "gamble",
+    "g": "🍎",
+    "shots": 8,
+    "speed": 300,
+    "cd": 0.4,
+    "r": 11,
+    "per_hit": 6,
+    "p_heal": 0.2,
+    "heal": 1,
+    "max": 6,
+    "max_fheal": 3,
+    "ev": 0.8
+   },
+   "text": "[득실 구슬] 사과 8개를 던져요 — 빨간 건 맞으면 6 피해, 초록(20%)은 상대가 1 회복 (최대 3)"
+  },
+  {
+   "id": "r01",
+   "name": "화염구",
+   "rarity": "rare",
+   "kind": "instant",
+   "fx": [],
+   "arena": {
+    "mode": "zone",
+    "count": 5,
+    "radius": 75,
+    "warn": 0.55,
+    "charge": 1.0,
+    "dc": 4,
+    "de": 2,
+    "max": 6,
+    "g": "🔥",
+    "ev": 3.58
+   },
+   "text": "[범위 폭격] 불덩이 5발을 떨어뜨려요 — 폭발에 맞으면 2~4 피해 (중앙일수록 큼, 최대 6)"
+  },
+  {
+   "id": "r02",
+   "name": "치유의 빛",
+   "rarity": "rare",
+   "kind": "instant",
+   "fx": [
+    {
+     "op": "heal",
+     "v": 3
+    }
+   ]
+  },
+  {
+   "id": "r03",
+   "name": "독안개",
+   "rarity": "rare",
+   "kind": "instant",
+   "fx": [],
+   "arena": {
+    "mode": "zone",
+    "count": 2,
+    "radius": 95,
+    "warn": 0.75,
+    "charge": 1.4,
+    "dc": 1,
+    "de": 1,
+    "linger": 2.8,
+    "tick": 0.4,
+    "tickdmg": 1,
+    "max": 5,
+    "g": "☠",
+    "ev": 2.88
+   },
+   "text": "[독구름] 독구름 2개를 깔아요 — 맞으면 1 피해, 안개 안에서는 계속 피해 (최대 5), 한 번이라도 맞히면 상대 3턴 중독",
+   "fx_hit": [
+    {
+     "op": "poison",
+     "v": 3
+    }
+   ]
+  },
+  {
+   "id": "r04",
+   "name": "방해 공작",
+   "rarity": "rare",
+   "kind": "instant",
+   "fx": [],
+   "arena": {
+    "mode": "zone",
+    "count": 6,
+    "radius": 72,
+    "warn": 0.6,
+    "charge": 0.7,
+    "dc": 2,
+    "de": 2,
+    "max": 5,
+    "g": "💣",
+    "ev": 2.41
+   },
+   "text": "[함정] 함정 6개를 깔아 터뜨려요 — 맞으면 2 피해 (최대 5), 한 번이라도 맞히면 상대 설치 1개 파괴",
+   "fx_hit": [
+    {
+     "op": "breakInstall",
+     "v": 1
+    }
+   ]
+  },
+  {
+   "id": "r05",
+   "name": "약탈",
+   "rarity": "rare",
+   "kind": "instant",
+   "fx": [],
+   "arena": {
+    "mode": "chase",
+    "speed": 280,
+    "r": 22,
+    "per_hit": 2,
+    "cd": 0.9,
+    "time": 7,
+    "max": 4,
+    "g": "🖐",
+    "ev": 2.79
+   },
+   "text": "[붙잡기] 손이 쫓아가요 — 닿으면 2 피해 (최대 4), 한 번이라도 닿으면 상대 손패 1장 버리기",
+   "fx_hit": [
+    {
+     "op": "discard",
+     "v": 1
+    }
+   ]
+  },
+  {
+   "id": "r06",
+   "name": "마력 보호막",
+   "rarity": "rare",
+   "kind": "instant",
+   "fx": [
+    {
+     "op": "shield",
+     "v": 3
+    }
+   ]
+  },
+  {
+   "id": "r07",
+   "name": "날선 칼날",
+   "rarity": "rare",
+   "kind": "install",
+   "duration": 4,
+   "fx": [],
+   "mods": {
+    "dealBonus": 1
+   }
+  },
+  {
+   "id": "r08",
+   "name": "치유의 샘",
+   "rarity": "rare",
+   "kind": "install",
+   "on": "turnStart",
+   "duration": 3,
+   "fx": [
+    {
+     "op": "heal",
+     "v": 2
+    }
+   ]
+  },
+  {
+   "id": "r09",
+   "name": "지연 보급",
+   "rarity": "rare",
+   "kind": "install",
+   "on": "expire",
+   "duration": 2,
+   "fx": [
+    {
+     "op": "draw",
+     "v": 3
+    }
+   ]
+  },
+  {
+   "id": "r10",
+   "name": "시한 폭탄",
+   "rarity": "rare",
+   "kind": "install",
+   "on": "expire",
+   "duration": 3,
+   "fx": [
+    {
+     "op": "dmg",
+     "v": 5
+    }
+   ]
+  },
+  {
+   "id": "r11",
+   "name": "쌍둥이 등불",
+   "rarity": "rare",
+   "kind": "install",
+   "on": "turnStart",
+   "need": 2,
+   "duration": 4,
+   "fx": [
+    {
+     "op": "heal",
+     "v": 3
+    }
+   ]
+  },
+  {
+   "id": "r12",
+   "name": "쌍둥이 화로",
+   "rarity": "rare",
+   "kind": "install",
+   "on": "turnStart",
+   "need": 2,
+   "duration": 4,
+   "fx": [
+    {
+     "op": "dmg",
+     "v": 3
+    }
+   ]
+  },
+  {
+   "id": "r13",
+   "name": "설치 폭발",
+   "rarity": "rare",
+   "kind": "instant",
+   "fx": [],
+   "arena": {
+    "mode": "zone",
+    "count_per_install": 1,
+    "radius": 100,
+    "warn": 0.5,
+    "charge": 0.7,
+    "dc": 4,
+    "de": 2,
+    "max_per_install": 4,
+    "ev_per": 2.34,
+    "ev": 0
+   },
+   "text": "[설치 폭발] 내 설치 카드 1장마다 폭탄 1발 (설치가 없으면 불발) — 폭발당 2~4 피해"
+  },
+  {
+   "id": "r14",
+   "name": "정원 가꾸기",
+   "rarity": "rare",
+   "kind": "instant",
+   "fx": [
+    {
+     "op": "healPerInstall",
+     "v": 3
+    }
+   ]
+  },
+  {
+   "id": "r15",
+   "name": "비틀린 행운",
+   "rarity": "rare",
+   "kind": "instant",
+   "fx": [],
+   "arena": {
+    "mode": "pick",
+    "n": 5,
+    "k": 3,
+    "time": 7,
+    "danger": [
+     {
+      "op": "dmg",
+      "v": 6
+     }
+    ],
+    "safe": [
+     {
+      "op": "foe",
+      "fx": [
+       {
+        "op": "heal",
+        "v": 2
+       }
+      ]
+     }
+    ]
+   },
+   "text": "[상자 고르기] 상대가 상자 5개 중 하나를 골라요 — 위험 상자(3개)면 6 피해, 안전 상자(2개)면 상대 체력 2 회복"
+  },
+  {
+   "id": "r16",
+   "name": "행운의 부적",
+   "rarity": "rare",
+   "kind": "install",
+   "on": "turnStart",
+   "duration": 4,
+   "fx": [
+    {
+     "op": "chance",
+     "p": 60,
+     "win": [
+      {
+       "op": "draw",
+       "v": 1
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "r17",
+   "name": "그림자 망토",
+   "rarity": "rare",
+   "kind": "install",
+   "duration": 3,
+   "fx": [],
+   "mods": {
+    "shrink": 0.3
+   },
+   "icon": "🧥"
+  },
+  {
+   "id": "r18",
+   "name": "정밀 조준경",
+   "rarity": "rare",
+   "kind": "install",
+   "duration": 3,
+   "fx": [],
+   "mods": {
+    "atk": 0.25
+   },
+   "icon": "🎯"
+  },
+  {
+   "id": "r19",
+   "name": "끈끈한 늪",
+   "rarity": "rare",
+   "kind": "install",
+   "duration": 3,
+   "fx": [],
+   "mods": {
+    "foeSlow": 0.2
+   },
+   "icon": "🕸"
+  },
+  {
+   "id": "r20",
+   "name": "철벽 방어",
+   "rarity": "rare",
+   "kind": "install",
+   "duration": 3,
+   "fx": [],
+   "barrier": 6,
+   "icon": "🧱"
+  },
+  {
+   "id": "r21",
+   "name": "번개 화살",
+   "rarity": "rare",
+   "kind": "instant",
+   "fx": [],
+   "arena": {
+    "mode": "shoot",
+    "shots": 6,
+    "speed": 650,
+    "cd": 0.4,
+    "r": 12,
+    "per_hit": 3,
+    "time": 8,
+    "max": 6,
+    "g": "arrow",
+    "ev": 3.23
+   },
+   "text": "[속사] 아주 빠른 화살 6발을 쏴요 — 맞을 때마다 3 피해 (최대 6)"
+  },
+  {
+   "id": "r22",
+   "name": "맹독 벌 떼",
+   "rarity": "rare",
+   "kind": "instant",
+   "fx": [],
+   "arena": {
+    "mode": "swarm",
+    "ants_base": 18,
+    "ants_per_copy": 0,
+    "speed": 125,
+    "per_hit": 2,
+    "max_base": 6,
+    "max_per_copy": 0,
+    "g": "🐝",
+    "ev": 1.61
+   },
+   "text": "[독벌 유인] 독벌 18마리가 몰려와요 — 닿는 만큼 2 피해 (최대 6), 한 번이라도 닿으면 상대 2턴 중독",
+   "fx_hit": [
+    {
+     "op": "poison",
+     "v": 2
+    }
+   ]
+  },
+  {
+   "id": "r23",
+   "name": "지진",
+   "rarity": "rare",
+   "kind": "instant",
+   "fx": [],
+   "arena": {
+    "mode": "zone",
+    "count": 4,
+    "radius": 85,
+    "warn": 0.65,
+    "charge": 0.9,
+    "dc": 3,
+    "de": 1,
+    "max": 7,
+    "g": "💥",
+    "ev": 3.25
+   },
+   "text": "[범위 폭격] 땅울림 4번을 일으켜요 — 맞으면 1~3 피해 (중앙일수록 큼, 최대 7)"
+  },
+  {
+   "id": "r24",
+   "name": "쌍날 추격자",
+   "rarity": "rare",
+   "kind": "instant",
+   "fx": [],
+   "arena": {
+    "mode": "chase",
+    "speed": 300,
+    "r": 18,
+    "per_hit": 2,
+    "cd": 0.7,
+    "time": 7,
+    "max": 6,
+    "g": "⚔",
+    "ev": 2.91
+   },
+   "text": "[추격] 쌍날 칼이 쫓아가요 — 닿을 때마다 2 피해 (최대 6), 한 번이라도 닿으면 상대 설치 1개 파괴",
+   "fx_hit": [
+    {
+     "op": "breakInstall",
+     "v": 1
+    }
+   ]
+  },
+  {
+   "id": "r25",
+   "name": "흡혈 박쥐",
+   "rarity": "rare",
+   "kind": "instant",
+   "fx": [],
+   "arena": {
+    "mode": "chase",
+    "speed": 290,
+    "r": 17,
+    "per_hit": 2,
+    "cd": 0.7,
+    "time": 7,
+    "max": 5,
+    "g": "🦇",
+    "ev": 2.6
+   },
+   "text": "[흡혈] 박쥐가 쫓아가요 — 닿을 때마다 2 피해 (최대 5), 한 번이라도 닿으면 내 체력 2 회복",
+   "fx_hit": [
+    {
+     "op": "heal",
+     "v": 2
+    }
+   ]
+  },
+  {
+   "id": "r26",
+   "name": "회전 톱날",
+   "rarity": "rare",
+   "kind": "instant",
+   "fx": [],
+   "arena": {
+    "mode": "orbit",
+    "g": "🪚",
+    "blade": 84,
+    "spin": 4.5,
+    "speed": 150,
+    "per_hit": 2,
+    "cd": 0.6,
+    "time": 9,
+    "max": 6,
+    "ev": 3.02
+   },
+   "text": "[회전 칼날] 톱날 달린 공을 마우스로 조종해요 — 칼날이 360도 돌며 닿을 때마다 2 피해 (최대 6), 클릭하면 역회전·가속"
+  },
+  {
+   "id": "r27",
+   "name": "결투 신청",
+   "rarity": "rare",
+   "kind": "instant",
+   "fx": [],
+   "arena": {
+    "mode": "duel",
+    "per_hit": 4,
+    "back": 5,
+    "time": 10,
+    "max": 8,
+    "max_self": 10,
+    "ev": 1.6
+   },
+   "text": "[칼싸움] 서로 칼로 싸워요 — 내가 베면 상대 4 피해(최대 8), 상대가 먼저 베면 내가 5 피해(최대 10)"
+  },
+  {
+   "id": "r28",
+   "name": "차원의 문",
+   "rarity": "rare",
+   "kind": "instant",
+   "fx": [],
+   "arena": {
+    "mode": "warp",
+    "portals": 5,
+    "r": 56,
+    "exit_r": 72,
+    "warn": 0.75,
+    "per_hit": 3,
+    "max": 8,
+    "ev": 3.08
+   },
+   "text": "[차원문] 문을 5번 열어요 — 상대가 들어가면 출구로 순간이동, 거기서 폭발 3 피해 (최대 8)"
+  },
+  {
+   "id": "r29",
+   "name": "심판의 격자",
+   "rarity": "rare",
+   "kind": "instant",
+   "fx": [],
+   "arena": {
+    "mode": "grid",
+    "n": 3,
+    "shots": 9,
+    "warn": 0.8,
+    "per_hit": 3,
+    "max": 8,
+    "ev": 2.35
+   },
+   "text": "[격자 심판] 칸을 9번 골라요 — 잠시 뒤 터지는 칸에 서 있으면 3 피해 (최대 8)"
+  },
+  {
+   "id": "r30",
+   "name": "화염 방사",
+   "rarity": "rare",
+   "kind": "instant",
+   "fx": [],
+   "arena": {
+    "mode": "cone",
+    "g": "🔥",
+    "shots": 4,
+    "half": 0.5,
+    "length": 330,
+    "warn": 0.7,
+    "per_hit": 5,
+    "de": 2,
+    "cd": 0.55,
+    "max": 8,
+    "ev": 1.68
+   },
+   "text": "[부채꼴] 불길을 4번 뿜어요 — 부채꼴 안에서 2~5 피해 (중앙일수록 큼, 최대 8)"
+  },
+  {
+   "id": "r31",
+   "name": "밀쳐내기 대포",
+   "rarity": "rare",
+   "kind": "instant",
+   "fx": [],
+   "arena": {
+    "mode": "knock",
+    "g": "💨",
+    "shots": 7,
+    "speed": 420,
+    "cd": 0.55,
+    "r": 12,
+    "per_hit": 2,
+    "push": 700,
+    "wall": 5,
+    "max": 9,
+    "ev": 2.4
+   },
+   "text": "[밀어내기] 돌풍 7발 — 맞으면 2 피해 + 크게 튕겨 나가요. 벽에 부딪히면 5 피해 (최대 9)"
+  },
+  {
+   "id": "r32",
+   "name": "거울의 저주",
+   "rarity": "rare",
+   "kind": "instant",
+   "fx": [],
+   "arena": {
+    "mode": "chase",
+    "g": "🪞",
+    "speed": 290,
+    "r": 18,
+    "per_hit": 2,
+    "cd": 0.7,
+    "time": 8,
+    "twist": "reverse",
+    "tw_at": 1.5,
+    "max": 6,
+    "ev": 3.92
+   },
+   "text": "[조작 반전] 쫓아가는 거울 — 닿을 때마다 2 피해 (최대 6), 1.5초 뒤부터 상대의 조작이 반대로 뒤집혀요"
+  },
+  {
+   "id": "r33",
+   "name": "치유의 의식",
+   "rarity": "rare",
+   "kind": "instant",
+   "fx": [],
+   "arena": {
+    "mode": "channel",
+    "g": "✚",
+    "need": 5,
+    "heal": 7,
+    "r": 62,
+    "speed": 140,
+    "blink": 1.8,
+    "drain": 1.8,
+    "time": 11,
+    "ev": 1.85
+   },
+   "text": "[치유 의식] 의식 원 안에서 5초를 채우면 체력 7 회복 — 상대가 원에 들어와 방해하면 진행이 깎여요 (클릭: 순간이동)"
+  },
+  {
+   "id": "r34",
+   "name": "빛나는 레이저",
+   "rarity": "rare",
+   "kind": "instant",
+   "fx": [],
+   "arena": {
+    "mode": "beam",
+    "shots": 2,
+    "dur": 1.8,
+    "width": 16,
+    "warn": 0.8,
+    "swing": 0.5,
+    "per_hit": 1,
+    "cd": 0.8,
+    "max": 8,
+    "ev": 3.19
+   },
+   "text": "[레이저] 레이저를 2번 쏴요 — 충전 후 발사, 쏘는 동안 마우스로 천천히 휘둘러요. 닿는 동안 계속 1 피해 (최대 7)"
+  },
+  {
+   "id": "h01",
+   "name": "광전사의 일격",
+   "rarity": "hero",
+   "kind": "instant",
+   "fx": [
+    {
+     "op": "selfdmg",
+     "v": 1
+    }
+   ],
+   "arena": {
+    "mode": "chase",
+    "speed": 260,
+    "r": 21,
+    "per_hit": 3,
+    "cd": 1.0,
+    "time": 7,
+    "max": 6,
+    "g": "🪓",
+    "ev": 3.34
+   },
+   "text": "[돌진] 큰 칼날이 쫓아가요 — 닿을 때마다 3 피해 (최대 6), 대신 내가 1 피해"
+  },
+  {
+   "id": "h02",
+   "name": "생명의 서약",
+   "rarity": "hero",
+   "kind": "instant",
+   "fx": [
+    {
+     "op": "heal",
+     "v": 4
+    },
+    {
+     "op": "discardChoose",
+     "v": 1
+    }
+   ]
+  },
+  {
+   "id": "h03",
+   "name": "역전의 칼날",
+   "rarity": "hero",
+   "kind": "instant",
+   "fx": [],
+   "arena": {
+    "mode": "shoot",
+    "shots": 7,
+    "speed": 560,
+    "cd": 0.4,
+    "r": 15,
+    "per_hit": 3,
+    "time": 8,
+    "max": 6,
+    "hit_bonus_if": {
+     "who": "me",
+     "cmp": "le",
+     "t": 7,
+     "b": 2
+    },
+    "ev_bonus": 1.52,
+    "g": "🗡",
+    "ev": 3.53
+   },
+   "text": "[칼날 투척] 빠른 칼날 7개를 던져요 — 맞을 때마다 3 피해 (최대 6), 내 체력이 7 이하면 5 피해 (최대 8)"
+  },
+  {
+   "id": "h04",
+   "name": "도적왕의 거래",
+   "rarity": "hero",
+   "kind": "instant",
+   "fx": [
+    {
+     "op": "selfdmg",
+     "v": 2
+    }
+   ],
+   "arena": {
+    "mode": "chase",
+    "speed": 285,
+    "r": 16,
+    "per_hit": 3,
+    "cd": 1.0,
+    "time": 7,
+    "max": 6,
+    "g": "💰",
+    "ev": 3.24
+   },
+   "text": "[소매치기] 날쌘 손이 쫓아가요 — 닿을 때마다 3 피해 (최대 6), 한 번이라도 닿으면 상대 손패 1장 훔치기, 대신 내가 2 피해",
+   "fx_hit": [
+    {
+     "op": "steal",
+     "v": 1
+    }
+   ]
+  },
+  {
+   "id": "h05",
+   "name": "독사의 이빨",
+   "rarity": "hero",
+   "kind": "instant",
+   "fx": [
+    {
+     "op": "selfdmg",
+     "v": 1
+    }
+   ],
+   "arena": {
+    "mode": "shoot",
+    "shots": 8,
+    "speed": 500,
+    "cd": 0.36,
+    "r": 13,
+    "per_hit": 3,
+    "time": 8,
+    "max": 6,
+    "g": "🐍",
+    "ev": 3.26
+   },
+   "text": "[독니 사격] 독니 8발을 쏴요 — 맞을 때마다 3 피해 (최대 6), 한 번이라도 맞히면 상대 2턴 중독, 대신 내가 1 피해",
+   "fx_hit": [
+    {
+     "op": "poison",
+     "v": 2
+    }
+   ]
+  },
+  {
+   "id": "h06",
+   "name": "광전사의 투구",
+   "rarity": "hero",
+   "kind": "install",
+   "duration": 3,
+   "fx": [],
+   "mods": {
+    "dealBonus": 2,
+    "takeReduce": -1
+   }
+  },
+  {
+   "id": "h07",
+   "name": "죽음의 룰렛",
+   "rarity": "hero",
+   "kind": "instant",
+   "fx": [],
+   "arena": {
+    "mode": "pick",
+    "n": 2,
+    "k": 1,
+    "time": 7,
+    "danger": [
+     {
+      "op": "dmg",
+      "v": 8
+     }
+    ],
+    "safe": [
+     {
+      "op": "foe",
+      "fx": [
+       {
+        "op": "heal",
+        "v": 3
+       }
+      ]
+     }
+    ]
+   },
+   "text": "[죽음의 룰렛] 상대가 두 상자 중 하나를 골라요 — 위험 상자면 8 피해, 안전 상자면 상대 체력 3 회복"
+  },
+  {
+   "id": "h08",
+   "name": "삼위일체 제단",
+   "rarity": "hero",
+   "kind": "install",
+   "on": "turnStart",
+   "need": 3,
+   "duration": 5,
+   "fx": [
+    {
+     "op": "dmg",
+     "v": 4
+    },
+    {
+     "op": "heal",
+     "v": 3
+    }
+   ]
+  },
+  {
+   "id": "h09",
+   "name": "지연 일격",
+   "rarity": "hero",
+   "kind": "install",
+   "on": "expire",
+   "duration": 2,
+   "fx": [
+    {
+     "op": "dmg",
+     "v": 6
+    }
+   ]
+  },
+  {
+   "id": "h10",
+   "name": "번개 신발",
+   "rarity": "hero",
+   "kind": "install",
+   "duration": 3,
+   "fx": [],
+   "mods": {
+    "dodge": 0.45,
+    "takeReduce": -1
+   },
+   "icon": "⚡"
+  },
+  {
+   "id": "h11",
+   "name": "수호 결계",
+   "rarity": "hero",
+   "kind": "install",
+   "on": "play",
+   "duration": 3,
+   "fx": [
+    {
+     "op": "discardSelf",
+     "v": 1
+    }
+   ],
+   "barrier": 9,
+   "icon": "🔰"
+  },
+  {
+   "id": "h12",
+   "name": "유성우",
+   "rarity": "hero",
+   "kind": "instant",
+   "fx": [],
+   "arena": {
+    "mode": "rain",
+    "g": "☄",
+    "slant": 0.35,
+    "volleys": 4,
+    "n": 12,
+    "spread": 120,
+    "fall": 1.0,
+    "r": 38,
+    "burn": 1.4,
+    "per_hit": 3,
+    "max": 10,
+    "help": [
+     "유성우",
+     "마우스로 낙하 지점을 정하고 클릭! 별똥별이 비스듬히 떨어져요.",
+     "바닥 표식을 보고 벗어나세요. 떨어진 뒤에도 불길이 남아요."
+    ],
+    "ev": 2.6
+   },
+   "text": "[유성우] 비스듬히 별똥별 12개씩 4번 쏟아지고 땅에 불길이 남아요 — 맞으면 3 피해, 불길 위에선 계속 피해 (최대 10)"
+  },
+  {
+   "id": "h13",
+   "name": "천둥 포격",
+   "rarity": "hero",
+   "kind": "instant",
+   "fx": [],
+   "arena": {
+    "mode": "shoot",
+    "shots": 7,
+    "speed": 620,
+    "cd": 0.38,
+    "r": 14,
+    "per_hit": 4,
+    "time": 8,
+    "max": 8,
+    "g": "⚡",
+    "ev": 4.2
+   },
+   "text": "[천둥 사격] 번개 포탄 7발을 쏴요 — 맞을 때마다 4 피해 (최대 8), 한 번이라도 맞히면 상대 손패 1장 버리기",
+   "fx_hit": [
+    {
+     "op": "discard",
+     "v": 1
+    }
+   ]
+  },
+  {
+   "id": "h14",
+   "name": "칼날 폭풍",
+   "rarity": "hero",
+   "kind": "instant",
+   "fx": [],
+   "arena": {
+    "mode": "orbit",
+    "g": "🗡",
+    "blade": 84,
+    "blades": 2,
+    "spin": 4.2,
+    "speed": 145,
+    "per_hit": 2,
+    "cd": 0.6,
+    "time": 9,
+    "max": 8,
+    "ev": 4.23
+   },
+   "text": "[회전 칼날] 칼 2개 달린 공을 마우스로 조종해요 — 칼이 360도 돌며 닿을 때마다 2 피해 (최대 8), 클릭하면 역회전·가속"
+  },
+  {
+   "id": "h15",
+   "name": "블랙홀",
+   "rarity": "hero",
+   "kind": "instant",
+   "fx": [],
+   "arena": {
+    "mode": "vortex",
+    "pull": 215,
+    "r_pull": 175,
+    "r_core": 32,
+    "per_hit": 1,
+    "tick": 0.45,
+    "time": 9,
+    "max": 10,
+    "ev": 3.92
+   },
+   "text": "[블랙홀] 상대를 끌어당겨요 — 중심에 닿으면 계속 1 피해 (최대 10)"
+  },
+  {
+   "id": "h16",
+   "name": "검투사의 도전",
+   "rarity": "hero",
+   "kind": "instant",
+   "fx": [],
+   "arena": {
+    "mode": "duel",
+    "per_hit": 7,
+    "back": 8,
+    "time": 10,
+    "max": 14,
+    "max_self": 14,
+    "ev": 2.4
+   },
+   "text": "[칼싸움 · 고위험] 내가 먼저 베면 상대 7 피해(최대 14), 상대가 먼저 베면 내가 8 피해(최대 14)"
+  },
+  {
+   "id": "h17",
+   "name": "관통 사격",
+   "rarity": "hero",
+   "kind": "instant",
+   "fx": [],
+   "arena": {
+    "mode": "shield",
+    "g": "arrow",
+    "shots": 9,
+    "speed": 500,
+    "cd": 0.32,
+    "r": 9,
+    "per_hit": 5,
+    "pierce_every": 2,
+    "sh_hp": 2,
+    "max": 10,
+    "ev": 3.07
+   },
+   "text": "[관통탄] 화살 9발 — 2발마다 방패를 뚫는 보라색 화살이에요. 맞을 때마다 5 피해 (최대 10)"
+  },
+  {
+   "id": "h18",
+   "name": "도깨비불",
+   "rarity": "hero",
+   "kind": "instant",
+   "fx": [],
+   "arena": {
+    "mode": "bounce",
+    "g": "🔥",
+    "n": 5,
+    "speed": 270,
+    "r": 15,
+    "per_hit": 3,
+    "cd": 0.8,
+    "twist": "drunk",
+    "time": 9,
+    "max": 10,
+    "ev": 3.11
+   },
+   "text": "[취기] 도깨비불 5개가 튕겨 다녀요 — 닿을 때마다 3 피해 (최대 10), 상대는 비틀비틀 취해서 조작이 흔들려요"
+  },
+  {
+   "id": "h19",
+   "name": "벼락 심판",
+   "rarity": "hero",
+   "kind": "instant",
+   "fx": [],
+   "arena": {
+    "mode": "rain",
+    "g": "⚡",
+    "auto": 1.1,
+    "volleys": 7,
+    "n": 6,
+    "spread": 60,
+    "fall": 0.45,
+    "r": 34,
+    "per_hit": 3,
+    "max": 10,
+    "help": [
+     "벼락 심판",
+     "이번 공격은 알아서 상대 근처로 번개가 떨어져요. 지켜보세요.",
+     "번개가 떨어질 자리에 잠깐 표식이 떠요. 보이자마자 벗어나세요!"
+    ],
+    "ev": 2.4
+   },
+   "text": "[가불기 · 낙뢰] 조종 없이 상대 머리 위로 낙뢰가 7번 떨어져요 — 경고가 짧아요. 맞으면 3 피해 (최대 10)"
+  },
+  {
+   "id": "h20",
+   "name": "암흑 속의 사냥꾼",
+   "rarity": "hero",
+   "kind": "instant",
+   "fx": [],
+   "arena": {
+    "mode": "shoot",
+    "g": "🗡",
+    "shots": 6,
+    "speed": 430,
+    "cd": 0.4,
+    "r": 10,
+    "per_hit": 3,
+    "fog": 130,
+    "max": 10,
+    "ev": 2.4
+   },
+   "text": "[암흑] 시야가 좁아져요 — 칼날 6발, 맞으면 3 피해 (최대 10). 상대는 자기 주변만 보여요"
+  },
+  {
+   "id": "h21",
+   "name": "도박꾼의 구슬",
+   "rarity": "hero",
+   "kind": "instant",
+   "fx": [],
+   "arena": {
+    "mode": "gamble",
+    "g": "💀",
+    "shots": 9,
+    "speed": 320,
+    "cd": 0.38,
+    "r": 12,
+    "per_hit": 8,
+    "p_heal": 0.25,
+    "heal": 2,
+    "max": 12,
+    "max_fheal": 8,
+    "ev": 2.4
+   },
+   "text": "[고위험 고수익] 구슬 9개 — 빨간 건 8 피해(최대 12), 초록(25%)은 상대가 2 회복 (최대 8). 상대가 일부러 먹을 수도 있어요"
+  },
+  {
+   "id": "l01",
+   "name": "용의 숨결",
+   "rarity": "legend",
+   "kind": "instant",
+   "fx": [],
+   "arena": {
+    "mode": "cone",
+    "g": "🔥",
+    "shots": 2,
+    "half": 0.5,
+    "length": 380,
+    "warn": 0.8,
+    "per_hit": 7,
+    "de": 3,
+    "cd": 0.8,
+    "max": 12,
+    "ev": 4.73
+   },
+   "text": "[부채꼴 화염] 용의 숨결을 2번 뿜어요 — 부채꼴 안에서 3~7 피해 (중앙일수록 큼, 최대 12). 맞히면 상대 설치 전부 파괴",
+   "fx_hit": [
+    {
+     "op": "breakAll"
+    }
+   ]
+  },
+  {
+   "id": "l02",
+   "name": "불사조의 눈물",
+   "rarity": "legend",
+   "kind": "instant",
+   "fx": [
+    {
+     "op": "healMissing",
+     "v": 5
+    }
+   ],
+   "icon": "🔥"
+  },
+  {
+   "id": "l03",
+   "name": "운명 교환",
+   "rarity": "legend",
+   "kind": "instant",
+   "fx": [
+    {
+     "op": "swapHp"
+    }
+   ],
+   "icon": "🔄"
+  },
+  {
+   "id": "l04",
+   "name": "시간 정지",
+   "rarity": "legend",
+   "kind": "instant",
+   "fx": [
+    {
+     "op": "timeStop",
+     "v": 1
+    }
+   ],
+   "icon": "⏳"
+  },
+  {
+   "id": "l05",
+   "name": "패 뒤집기",
+   "rarity": "legend",
+   "kind": "instant",
+   "fx": [
+    {
+     "op": "handSwap"
+    }
+   ],
+   "icon": "🔀"
+  },
+  {
+   "id": "l06",
+   "name": "불굴의 맹세",
+   "rarity": "legend",
+   "kind": "install",
+   "fx": [],
+   "mods": {
+    "surviveOnce": 1
+   },
+   "icon": "🕊"
+  },
+  {
+   "id": "l07",
+   "name": "약탈의 밤",
+   "rarity": "legend",
+   "kind": "instant",
+   "fx": [
+    {
+     "op": "steal",
+     "v": 2
+    },
+    {
+     "op": "discard",
+     "v": 99
+    }
+   ],
+   "icon": "🌙"
+  },
+  {
+   "id": "l08",
+   "name": "운명의 동전",
+   "rarity": "legend",
+   "kind": "instant",
+   "fx": [],
+   "icon": "🪙",
+   "arena": {
+    "mode": "pick",
+    "n": 2,
+    "k": 1,
+    "time": 7,
+    "danger": [
+     {
+      "op": "dmg",
+      "v": 7
+     },
+     {
+      "op": "heal",
+      "v": 4
+     }
+    ],
+    "safe": [
+     {
+      "op": "foe",
+      "fx": [
+       {
+        "op": "heal",
+        "v": 4
+       }
+      ]
+     }
+    ]
+   },
+   "text": "[운명의 동전] 상대가 동전의 앞뒤를 맞혀요 — 틀리면 7 피해 + 내가 체력 4 회복, 맞히면 상대 체력 4 회복"
+  },
+  {
+   "id": "l09",
+   "name": "거울의 방",
+   "rarity": "legend",
+   "kind": "instant",
+   "fx": [
+    {
+     "op": "mirror"
+    }
+   ],
+   "icon": "🔁"
+  },
+  {
+   "id": "l10",
+   "name": "모래시계",
+   "rarity": "legend",
+   "kind": "install",
+   "on": "expire",
+   "duration": 3,
+   "fx": [
+    {
+     "op": "heal",
+     "v": 8
+    },
+    {
+     "op": "draw",
+     "v": 2
+    }
+   ],
+   "icon": "⌛"
+  },
+  {
+   "id": "l11",
+   "name": "시간의 틈",
+   "rarity": "legend",
+   "kind": "install",
+   "duration": 4,
+   "fx": [],
+   "mods": {
+    "projSlow": 0.3
+   },
+   "icon": "🌀"
+  },
+  {
+   "id": "l12",
+   "name": "운석 낙하",
+   "rarity": "legend",
+   "kind": "instant",
+   "fx": [],
+   "arena": {
+    "mode": "zone",
+    "count": 1,
+    "radius": 130,
+    "warn": 0.9,
+    "charge": 2.2,
+    "dc": 9,
+    "de": 4,
+    "max": 10,
+    "g": "☄",
+    "ev": 6.64
+   },
+   "text": "[운석] 거대한 운석을 떨어뜨려요 (일정 시간 뒤 자동 발사) — 맞으면 4~9 피해 (중앙일수록 큼), 맞히면 내 체력 5 회복",
+   "fx_hit": [
+    {
+     "op": "heal",
+     "v": 5
+    }
+   ]
+  },
+  {
+   "id": "l13",
+   "name": "죽음의 사신",
+   "rarity": "legend",
+   "kind": "instant",
+   "fx": [
+    {
+     "op": "selfdmg",
+     "v": 2
+    }
+   ],
+   "arena": {
+    "mode": "chase",
+    "speed": 320,
+    "r": 24,
+    "per_hit": 4,
+    "cd": 1.1,
+    "time": 8,
+    "max": 8,
+    "g": "💀",
+    "ev": 7.28
+   },
+   "text": "[처형] 사신의 낫이 쫓아가요 — 닿을 때마다 4 피해 (최대 8), 대신 내가 2 피해"
+  },
+  {
+   "id": "l14",
+   "name": "차원 붕괴",
+   "rarity": "legend",
+   "kind": "instant",
+   "fx": [],
+   "arena": {
+    "mode": "warp",
+    "portals": 5,
+    "r": 54,
+    "exit_r": 70,
+    "warn": 0.8,
+    "per_hit": 7,
+    "twist": "rot",
+    "tw_at": 2.0,
+    "max": 14,
+    "ev": 4.74
+   },
+   "text": "[차원 붕괴] 문 5개 — 들어가면 출구에서 폭발 7 피해 (최대 14), 2초 뒤부터 상대의 조작이 90도 돌아가요. 맞히면 상대 설치 1개 파괴",
+   "fx_hit": [
+    {
+     "op": "breakInstall",
+     "v": 1
+    }
+   ]
+  },
+  {
+   "id": "l15",
+   "name": "신의 심판",
+   "rarity": "legend",
+   "kind": "instant",
+   "fx": [],
+   "arena": {
+    "mode": "grid",
+    "n": 3,
+    "auto": 1,
+    "waves": 2,
+    "warn": 1.1,
+    "per_hit": 8,
+    "max": 14,
+    "help": [
+     "신의 심판",
+     "조종 없이 격자 9칸 중 8칸이 심판받아요. 지켜보세요.",
+     "빨갛게 변하지 않은 단 한 칸으로 재빨리 이동하세요!"
+    ],
+    "ev": 5.43
+   },
+   "text": "[가불기 · 심판] 두 번에 걸쳐 격자 9칸 중 단 1칸만 남기고 전부 심판해요 — 맞으면 8 피해 (최대 14)"
+  },
+  {
+   "id": "l16",
+   "name": "천지개벽",
+   "rarity": "legend",
+   "kind": "instant",
+   "fx": [],
+   "arena": {
+    "mode": "vortex",
+    "pull": 180,
+    "r_pull": 190,
+    "r_core": 30,
+    "per_hit": 1,
+    "tick": 0.45,
+    "boom": 130,
+    "boom_dmg": 9,
+    "time": 9,
+    "max": 14,
+    "ev": 6.85
+   },
+   "text": "[블랙홀 붕괴] 블랙홀이 상대를 끌어당기다가 마지막에 크게 폭발해요 — 중심 1 피해씩, 폭발 9 피해 (최대 14)"
+  },
+  {
+   "id": "l17",
+   "name": "대치유의 의식",
+   "rarity": "legend",
+   "kind": "instant",
+   "fx": [],
+   "arena": {
+    "mode": "channel",
+    "g": "✚",
+    "need": 5,
+    "heal": 12,
+    "r": 70,
+    "speed": 150,
+    "blink": 1.4,
+    "drain": 2.0,
+    "time": 12,
+    "ev": 5.4
+   },
+   "text": "[대치유] 의식 원 안에서 5초를 채우면 체력 12 회복 — 상대가 원에 들어오면 진행이 깎여요 (클릭: 순간이동)"
+  },
+  {
+   "id": "l18",
+   "name": "저주받은 왕",
+   "rarity": "legend",
+   "kind": "instant",
+   "fx": [],
+   "arena": {
+    "mode": "orbit",
+    "g": "🗡",
+    "blade": 96,
+    "blades": 3,
+    "spin": 4.0,
+    "speed": 140,
+    "per_hit": 2,
+    "cd": 0.6,
+    "time": 10,
+    "twist": "reverse",
+    "tw_at": 4,
+    "max": 12,
+    "ev": 6.93
+   },
+   "text": "[왕의 저주] 칼날 3개 달린 공을 조종해요 — 닿을 때마다 2 피해 (최대 12), 4초 뒤부터 상대의 조작이 반대로 뒤집혀요"
+  }
+ ]
 }
-ON_LABEL = {"play": "설치 즉시", "turnStart": "내 턴 시작", "turnEnd": "내 턴 끝", "hit": "피해를 받을 때", "expire": "시한 만료"}
-RN = {"common": "일반", "rare": "레어", "hero": "영웅", "legend": "레전드"}
-KN = {"instant": "즉발", "install": "설치"}
-RORDER = ["common", "rare", "hero", "legend"]
-RCOLOR = {"common": "37", "rare": "34", "hero": "35", "legend": "33"}
-
-
-# ----------------------------------------------------------------------
-# 데이터 로드
-# ----------------------------------------------------------------------
-def load_data():
-    path = os.path.join(HERE, "cards.json")
-    with open(path, encoding="utf-8") as f:
-        data = json.load(f)
-    cfg = data["config"]
-    cards = {}
-
-    def check(cid, fx):
-        for e in fx:
-            if e["op"] not in OPS:
-                sys.exit(f"cards.json 오류: {cid} 의 알 수 없는 효과 {e['op']}")
-            if e["op"] == "chance":
-                check(cid, e["win"])
-                check(cid, e.get("lose", []))
-            if e["op"] == "foe":
-                check(cid, e["fx"])
-
-    for c in data["cards"]:
-        if c["id"] in cards:
-            sys.exit(f"cards.json 오류: id 중복 {c['id']}")
-        if c["rarity"] not in RN or c["kind"] not in KN:
-            sys.exit(f"cards.json 오류: {c['id']} 의 rarity/kind 가 올바르지 않아요")
-        check(c["id"], c.get("fx", []))
-        check(c["id"], c.get("fx_hit", []))
-        if "arena" in c:
-            ar = c["arena"]
-            if ar.get("mode") not in __import__("arena").MODES:
-                sys.exit(f"cards.json 오류: {c['id']} 의 arena.mode 가 올바르지 않아요")
-            check(c["id"], ar.get("danger", []))
-            check(c["id"], ar.get("safe", []))
-            if not c.get("text"):
-                sys.exit(f"cards.json 오류: 공격 카드 {c['id']} 에는 text(설명)가 필요해요")
-        if c.get("on") == "expire" and not c.get("duration"):
-            sys.exit(f"cards.json 오류: {c['id']} 는 on=expire 이므로 duration(몇 턴 뒤)이 필요해요")
-        cards[c["id"]] = c
-    limit = {r: (v if v is not None else 10 ** 9) for r, v in cfg["rarity_limit"].items()}
-    cfg.setdefault("max_copies", 5)
-    return cfg, cards, limit
-
-
-CFG, CARDS, LIMIT = load_data()
-COLOR = True
-
-
-def paint(text, code):
-    return f"\033[{code}m{text}\033[0m" if COLOR else text
-
-
-def describe(c):
-    if c.get("text"):
-        return c["text"]
-    fx = fx_text(c.get("fx", []))
-    if c["kind"] == "instant":
-        return fx + "."
-    parts = []
-    m = c.get("mods", {})
-    if m.get("dealBonus"):
-        parts.append(f"내 즉발 피해 +{m['dealBonus']}")
-    tr = m.get("takeReduce", 0)
-    if tr > 0:
-        parts.append(f"받는 피해 -{tr}")
-    elif tr < 0:
-        parts.append(f"받는 피해 +{-tr}")
-    if m.get("surviveOnce"):
-        parts.append("체력이 0이 되면 1로 버티고 사라짐")
-    if c.get("barrier"):
-        parts.append(f"받는 피해를 최대 {c['barrier']}까지 막음 (모두 막으면 사라짐)")
-    if m.get("dodge"):
-        parts.append(f"피할 때 이동속도 +{round(m['dodge'] * 100)}%")
-    if m.get("shrink"):
-        parts.append(f"피할 때 몸 크기 -{round(m['shrink'] * 100)}%")
-    if m.get("atk"):
-        parts.append(f"공격할 때 투사체 속도·폭발 범위 +{round(m['atk'] * 100)}%")
-    if m.get("foeSlow"):
-        parts.append(f"상대가 피할 때 이동속도 -{round(m['foeSlow'] * 100)}%")
-    if m.get("projSlow"):
-        parts.append(f"상대 투사체 속도 -{round(m['projSlow'] * 100)}%, 폭격 경고 시간 +{round(m['projSlow'] * 100)}%")
-    if c.get("on") == "expire":
-        parts.append(f"설치 {c['duration']}턴 뒤 발동: {fx}")
-        return " · ".join(parts)
-    if fx:
-        need = f"설치 {c['need']}장 이상일 때 " if c.get("need") else ""
-        parts.append(f"{need}{ON_LABEL[c.get('on', 'play')]}: {fx}")
-    if c.get("duration"):
-        parts.append(f"{c['duration']}턴 지속")
-    else:
-        parts.append("1회용" if m.get("surviveOnce") else "영구")
-    return " · ".join(parts)
-
-
-def _collect_ops(fx, out):
-    for e in fx:
-        out.add(e["op"])
-        if e["op"] == "chance":
-            _collect_ops(e["win"], out)
-            _collect_ops(e.get("lose", []), out)
-
-
-def card_notes(c):
-    """확대 보기에 보여 줄 자세한 규칙 설명 목록"""
-    ops = set()
-    _collect_ops(c.get("fx", []), ops)
-    m = c.get("mods", {})
-    n = []
-    if c["kind"] == "instant":
-        n.append("즉발 카드 — 사용하면 내 턴이 끝나요.")
-        if c.get("arena"):
-            try:
-                import arena as _ar
-                title, att, dfn = _ar.help_for(c["arena"])
-                n.append(f"공격 방식 [{title}] — 공격할 때 검은 아레나가 열려요.")
-                n.append("공격하는 쪽: " + att)
-                n.append("피하는 쪽: " + dfn)
-            except Exception:
-                pass
-            if c.get("fx_hit"):
-                n.append("한 번이라도 맞히면 추가 효과가 발동해요.")
-            n.append("맞은 피해는 설치 방벽 → 보호막 → 체력 순서로 깎여요.")
-    else:
-        n.append("설치 카드 — 턴을 쓰지 않지만 한 턴에 1장만 쓸 수 있고, 설치 칸을 차지해요.")
-    if c.get("on") == "expire":
-        n.append(f"시한 설치 — 설치하고 {c['duration']}턴 뒤(내 {c['duration']}번째 다음 턴이 끝날 때) 발동하고 사라져요. "
-                 "그 전에 상대가 설치를 파괴하면 발동하지 않아요.")
-    elif c["kind"] == "install":
-        if c.get("duration"):
-            n.append(f"{c['duration']}턴 동안 유지된 뒤 사라져요 (설치한 턴은 세지 않아요).")
-        elif not m.get("surviveOnce"):
-            n.append("한 번 설치하면 상대가 파괴하기 전까지 계속 유지돼요.")
-    if c.get("need"):
-        n.append(f"내 설치 카드가 이 카드 포함 {c['need']}장 이상일 때만 효과가 발동해요.")
-    if m.get("dealBonus"):
-        n.append("내가 쓰는 즉발 카드의 '상대에게 주는 피해'가 늘어나요.")
-    if m.get("takeReduce", 0) < 0:
-        n.append("대신 내가 한 번에 받는 피해가 늘어나요 (공격 한 번당 +1).")
-    if m.get("surviveOnce"):
-        n.append("체력이 0 이하가 되는 순간 한 번만 체력 1로 버티고, 이 카드는 사라져요.")
-    if "dmgPerCopy" in ops or "healPerCopy" in ops:
-        n.append("손패에 남은 같은 이름의 카드 수를 세요. 사용한 카드 자신은 세지 않아요.")
-    if "discardCopies" in ops:
-        n.append("사용하면 손패에 있는 같은 카드가 전부 사라져요. 모아서 한 번에 터뜨리는 카드예요.")
-    if "dmgPerInstall" in ops or "healPerInstall" in ops:
-        n.append("지금 내 설치 칸에 깔려 있는 카드 수를 세요.")
-    if "chance" in ops or (c.get("arena") or {}).get("mode") == "pick":
-        n.append("확률 효과 — 결과는 방장 컴퓨터가 무작위로 정해요.")
-    if "dmgRand" in ops or "healRand" in ops:
-        n.append("수치는 범위 안에서 무작위로 정해져요.")
-    if "poison" in ops:
-        n.append("중독 — 상대의 턴이 시작될 때마다 1 피해를 입어요 (방어는 적용돼요).")
-    if "shield" in ops:
-        n.append("보호막 — 설치 방벽 다음으로 피해를 흡수해요. 다 쓰거나, 내 다음 턴이 끝나면 사라져요.")
-    if c.get("barrier"):
-        n.append(f"방벽 — 받는 피해를 총 {c['barrier']}까지 막아 줘요. 모두 막으면 사라지고, 지속 턴이 지나도 사라져요.")
-    if m.get("dodge") or m.get("shrink"):
-        n.append("필드 전용 — 내가 아레나에서 피하는 쪽일 때만 효과가 있어요.")
-    if m.get("atk") or m.get("foeSlow") or m.get("projSlow"):
-        n.append("필드 전용 — 아레나에서만 효과가 있어요 (공격할 때/상대가 피할 때).")
-    if "foe" in ops:
-        n.append("'상대가' 효과는 상대가 직접 받아요. 상대 체력 회복처럼 상대에게 이로울 수 있어요.")
-    if "steal" in ops:
-        n.append("훔친 카드는 내 손패로 들어와요 (손패가 가득 차면 사라져요).")
-    if "swapHp" in ops:
-        n.append("두 사람의 체력을 서로 바꿔요. 내 체력이 낮을수록 유리해요.")
-    if "handSwap" in ops:
-        n.append("손패를 통째로 바꿔요. 내 손패가 나쁘고 상대 손패가 많을수록 유리해요.")
-    if "timeStop" in ops:
-        n.append("상대의 다음 턴이 통째로 건너뛰어져, 내가 연달아 두 번 행동해요.")
-    if "breakAll" in ops:
-        n.append("상대가 깔아 둔 설치 카드를 한 장도 남기지 않고 부숴요.")
-    if "healMissing" in ops:
-        n.append("체력을 많이 잃었을수록 많이 회복해요. 체력이 이미 높으면 최소 수치만 회복해요.")
-    if "mirror" in ops:
-        n.append("상대가 이번 게임에서 마지막으로 쓴 즉발 카드를 내 것처럼 사용해요 (거울 카드는 복사할 수 없어요).")
-    return n
-
-
-def card_line(cid):
-    c = CARDS[cid]
-    tag = paint(f"[{RN[c['rarity']]}·{KN[c['kind']]}] {c['name']}", RCOLOR[c["rarity"]])
-    return f"{tag} — {describe(c)}"
-
-
-# ----------------------------------------------------------------------
-# 덱 규칙
-# ----------------------------------------------------------------------
-def rarity_counts(deck):
-    n = {r: 0 for r in RORDER}
-    for cid in deck:
-        if cid in CARDS:
-            n[CARDS[cid]["rarity"]] += 1
-    return n
-
-
-def validate_deck(deck):
-    if not isinstance(deck, list) or not CFG["deck_min"] <= len(deck) <= CFG["deck_max"]:
-        return (f"덱은 {CFG['deck_min']}~{CFG['deck_max']}장이어야 해요. " f"(지금 {len(deck) if isinstance(deck, list) else '?'}장)")
-    if any(cid not in CARDS for cid in deck):
-        return "존재하지 않는 카드가 있어요."
-    n = rarity_counts(deck)
-    for r in RORDER:
-        if n[r] > LIMIT[r]:
-            return f"{RN[r]} 카드는 최대 {LIMIT[r]}장이에요."
-    mc = CFG["max_copies"]
-    over = sorted({CARDS[x]["name"] for x in deck if deck.count(x) > mc})
-    if over:
-        return f"같은 카드는 최대 {mc}장까지예요. ({', '.join(over)})"
-    return None
-
-
-def auto_deck():
-    """등급·같은 카드 장수 제한 안에서 균형 잡힌 덱을 무작위로 만듭니다 (AI 상대 덱 / 자동 구성용)."""
-    size, mc = CFG["deck_max"], CFG["max_copies"]
-    pools = {r: [c["id"] for c in CARDS.values() if c["rarity"] == r] for r in RORDER}
-    want = {"legend": min(LIMIT["legend"], 2), "hero": min(LIMIT["hero"], random.randint(5, 6)),
-            "rare": min(LIMIT["rare"], random.randint(9, 10))}
-    deck = []
-
-    def add(r):
-        bag = [x for x in pools[r] if deck.count(x) < mc]
-        if bag:
-            deck.append(random.choice(bag))
-            return True
-        return False
-    for r in ("legend", "hero", "rare"):
-        for _ in range(want[r]):
-            add(r)
-    while len(deck) < size:
-        if not add("common"):
-            break
-    return random.sample(deck, len(deck))
-
-
-def load_deck():
-    try:
-        with open(DECK_FILE, encoding="utf-8") as f:
-            return [c for c in json.load(f) if c in CARDS]
-    except (OSError, ValueError):
-        return auto_deck()
-
-
-def save_deck(deck):
-    try:
-        with open(DECK_FILE, "w", encoding="utf-8") as f:
-            json.dump(deck, f)
-    except OSError:
-        pass
-
-
-# ----------------------------------------------------------------------
-# 게임 엔진 (화면과 완전히 분리)
-# ----------------------------------------------------------------------
-class Player:
-    def __init__(self, deck):
-        self.hp, self.deck_list, self.deck = CFG["start_hp"], list(deck), random.sample(deck, len(deck))
-        self.hand = []
-        self.field = []   # {"id", "left", "fresh"}
-        self.poison = 0   # 남은 중독 턴
-        self.shield = 0   # 남은 보호막
-        self.skip = 0     # 건너뛸 턴 수
-        self.shield_fresh = False   # 이번 턴에 얻은 보호막인지 (다음 내 턴이 끝나면 사라짐)
-
-    def mod(self, key):
-        return sum(CARDS[f["id"]].get("mods", {}).get(key, 0) for f in self.field)
-
-
-def pull(hand, n):
-    """손패에서 무작위로 최대 n장을 뽑아 내고, 뽑힌 카드 목록을 돌려줘요"""
-    return [hand.pop(random.randrange(len(hand))) for _ in range(min(n, len(hand)))]
-
-
-class Game:
-    def __init__(self, deck0, deck1):
-        self.p, self.turn, self.over = [Player(deck0), Player(deck1)], random.randint(0, 1), False
-        self.winner = None  # 0, 1, -1(무승부)
-        self.log, self.seq = [], 0
-        self.installed = False             # 이번 턴에 설치 카드를 썼는지 (턴당 1장)
-        self.last = None                   # 마지막으로 사용된 카드 (플레이어, 카드 id)
-        self.last_instant = [None, None]   # 각 플레이어가 마지막으로 쓴 즉발 카드 (거울의 방용)
-        self.pending = None                # 진행 중인 아레나 공격 (결과가 올 때까지 턴이 넘어가지 않아요)
-        for pi in (0, 1):
-            for _ in range(CFG["start_hand"]):
-                self.take_card(pi)
-        self.say(self.turn, "선공으로 시작해요")
-        self.start_turn(first=True)
-
-    # --- 기록 / 뽑기 ---
-    def say(self, who, text):
-        self.log.append((who, text))
-        del self.log[:-30]
-
-    def take_card(self, pi):
-        p = self.p[pi]
-        if not p.deck:
-            return
-        cid = p.deck.pop()
-        if len(p.hand) >= CFG["hand_limit"]:
-            self.say(pi, f"손패가 가득 차 {CARDS[cid]['name']} 소멸")
-        else:
-            p.hand.append(cid)
-
-    def draw(self, pi, n):
-        p = self.p[pi]
-        for _ in range(n):
-            if not p.deck:  # 덱을 다 뽑았다 → 리필 후 refill_draw 장
-                p.deck = random.sample(p.deck_list, len(p.deck_list))
-                self.say(pi, f"덱을 {len(p.deck_list)}장으로 다시 채웠어요")
-                for _ in range(CFG["refill_draw"]):
-                    self.take_card(pi)
-            else:
-                self.take_card(pi)
-
-    # --- 전투 ---
-    def check_over(self):
-        for i in (0, 1):
-            P = self.p[i]
-            if P.hp <= 0:  # 불굴의 맹세 같은 '버티기' 설치
-                for f in P.field:
-                    if CARDS[f["id"]].get("mods", {}).get("surviveOnce"):
-                        P.field.remove(f)
-                        P.hp = 1
-                        self.say(i, f"{CARDS[f['id']]['name']} 발동! 체력 1로 버텨요")
-                        break
-        dead = [i for i in (0, 1) if self.p[i].hp <= 0]
-        if dead:
-            self.over, self.winner = True, -1 if len(dead) == 2 else 1 - dead[0]
-
-    def fire(self, pi, trig, no_hit=False):
-        """pi 의 설치 카드 중 trig 시점에 발동하는 것을 실행 (need: 설치 장수 조건)."""
-        P = self.p[pi]
-        for f in list(P.field):
-            d = CARDS[f["id"]]
-            if d["kind"] == "install" and d.get("on") == trig and len(P.field) >= d.get("need", 0):
-                self.run_fx(pi, d["fx"], no_hit=no_hit)
-                if self.over:
-                    return
-
-    def deal_damage(self, tgt, amt, no_hit=False):
-        if amt <= 0:
-            return
-        P = self.p[tgt]
-        vul = -min(0, P.mod("takeReduce"))          # 취약: 한 번에 받는 피해 증가
-        real = amt + vul
-        notes = [f"취약 +{vul}"] if vul else []
-        for f in list(P.field):                      # 1) 설치 방벽이 먼저 막아 줘요
-            if real <= 0:
-                break
-            if f.get("hp"):
-                ab = min(f["hp"], real)
-                f["hp"] -= ab
-                real -= ab
-                name = CARDS[f["id"]]["name"]
-                notes.append(f"{name} -{ab}")
-                if f["hp"] <= 0:
-                    P.field.remove(f)
-                    self.say(tgt, f"{name} 파괴!")
-        if P.shield > 0 and real > 0:                # 2) 보호막
-            ab = min(P.shield, real)
-            P.shield -= ab
-            real -= ab
-            notes.append(f"보호막 -{ab}")
-        P.hp -= real
-        extra = f" ({', '.join(notes)})" if notes else ""
-        self.say(tgt, f"{real} 피해{extra} · 체력 {max(P.hp, 0)}" if real else f"피해를 모두 막았어요{extra}")
-        self.check_over()
-        if real > 0 and not no_hit and not self.over:
-            self.fire(tgt, "hit", no_hit=True)
-
-    def heal(self, o, n):
-        P = self.p[o]
-        P.hp = min(CFG["max_hp"], P.hp + n)
-        self.say(o, f"체력 +{n} · 체력 {P.hp}")
-
-    def run_fx(self, o, fx, bonus=False, no_hit=False, cid=None):
-        P, Q = self.p[o], self.p[1 - o]
-        copies = P.hand.count(cid) if cid else 0   # 손패에 남은 '다른' 같은 카드 수 (사용한 카드 제외)
-        extra = P.mod("dealBonus") if bonus else 0
-        for e in fx:
-            if self.over:
-                break
-            op = e["op"]
-            v = e.get("v", 0)
-            if op == "dmg":
-                self.deal_damage(1 - o, v + extra, no_hit)
-            elif op == "dmgPerCopy":
-                self.deal_damage(1 - o, e.get("b", 0) + v * copies + extra, no_hit)
-            elif op == "dmgIf":
-                who = o if e["who"] == "me" else 1 - o
-                hp = self.p[who].hp
-                cond = hp <= e["t"] if e["cmp"] == "le" else hp >= e["t"]
-                self.deal_damage(1 - o, v + (e["b"] if cond else 0) + extra, no_hit)
-            elif op == "dmgRand":
-                n = random.randint(v, e["b"])
-                if n + extra <= 0:
-                    self.say(o, "주사위가 빗나갔어요")
-                else:
-                    self.deal_damage(1 - o, n + extra, no_hit)
-            elif op == "dmgPerInstall":
-                self.deal_damage(1 - o, v * len(P.field) + extra, no_hit)
-            elif op == "healRand":
-                self.heal(o, random.randint(v, e["b"]))
-            elif op == "healPerInstall":
-                self.heal(o, v * len(P.field))
-            elif op == "chance":
-                win = random.random() * 100 < e["p"]
-                self.say(o, "행운! 🍀" if win else "불운… 💧")
-                self.run_fx(o, e["win"] if win else e.get("lose", []), bonus, no_hit, cid)
-            elif op == "discardCopies":
-                n = P.hand.count(cid) if cid else 0
-                P.hand[:] = [x for x in P.hand if x != cid]
-                if n:
-                    self.say(o, f"{CARDS[cid]['name']} {n}장 소멸")
-            elif op == "breakAll":
-                n = len(Q.field)
-                Q.field.clear()
-                self.say(1 - o, f"설치 카드 {n}장이 모두 파괴됐어요")
-            elif op == "healMissing":
-                self.heal(o, max(v, (CFG["max_hp"] - P.hp + 1) // 2))
-            elif op == "mirror":
-                m = self.last_instant[1 - o]
-                if m and not any(x["op"] == "mirror" for x in CARDS[m]["fx"]):
-                    self.say(o, f"거울! 상대의 {CARDS[m]['name']} 효과를 복사")
-                    self.run_fx(o, CARDS[m]["fx"], bonus=True, no_hit=no_hit)
-                else:
-                    self.say(o, "거울에 비출 카드가 없어요")
-            elif op == "selfdmg":
-                P.hp -= v
-                self.say(o, f"스스로 {v} 피해 · 체력 {max(P.hp, 0)}")
-                self.check_over()
-            elif op == "heal":
-                self.heal(o, v)
-            elif op == "healPerCopy":
-                self.heal(o, e.get("b", 0) + v * copies)
-            elif op == "draw":
-                self.draw(o, v)
-                self.say(o, f"카드 {v}장 뽑기")
-            elif op == "discard":
-                self.say(1 - o, f"손패 {len(pull(Q.hand, v))}장 버려짐")
-            elif op == "discardSelf":
-                self.say(o, f"손패 {len(pull(P.hand, v))}장 버림")
-            elif op == "steal":
-                got = pull(Q.hand, v)
-                P.hand += got[:max(0, CFG["hand_limit"] - len(P.hand))]
-                self.say(o, f"상대 손패 {len(got)}장 훔침")
-            elif op == "breakInstall":
-                for _ in range(v):
-                    if Q.field:
-                        f = Q.field.pop(random.randrange(len(Q.field)))
-                        self.say(1 - o, f"{CARDS[f['id']]['name']} 파괴됨")
-            elif op == "poison":
-                Q.poison = max(Q.poison, v)
-                self.say(1 - o, f"중독! ({Q.poison}턴)")
-            elif op == "shield":
-                P.shield += v
-                P.shield_fresh = True
-                self.say(o, f"보호막 {P.shield}")
-            elif op == "foe":
-                self.run_fx(1 - o, e["fx"], no_hit=no_hit)
-            elif op == "swapHp":
-                P.hp, Q.hp = Q.hp, P.hp
-                self.say(o, f"체력 교환! 나 {P.hp} · 상대 {Q.hp}")
-                self.check_over()
-            elif op == "handSwap":
-                P.hand, Q.hand = Q.hand, P.hand
-                self.say(o, "손패를 통째로 맞바꿨어요")
-            elif op == "timeStop":
-                Q.skip += v
-                self.say(o, "시간 정지! 상대의 다음 턴을 건너뛰어요")
-
-    # --- 턴 진행 ---
-    def start_turn(self, first=False):
-        pi = self.turn
-        P = self.p[pi]
-        self.installed = False
-        if P.poison > 0:
-            P.poison -= 1
-            self.say(pi, "중독 피해")
-            self.deal_damage(pi, 1, no_hit=True)
-            if self.over:
-                return
-        self.fire(pi, "turnStart")
-        if self.over:
-            return
-        if not (first and CFG["first_player_skips_draw"]):
-            self.draw(pi, CFG["draw_per_turn"])
-
-    def pass_turn(self):
-        cur = self.turn
-        P = self.p[cur]
-        self.fire(cur, "turnEnd")
-        if self.over:
-            return
-        keep, expired = [], []
-        for f in P.field:
-            if f["fresh"]:
-                f["fresh"] = False
-                keep.append(f)
-            elif f["left"] is None:
-                keep.append(f)
-            else:
-                f["left"] -= 1
-                if f["left"] > 0:
-                    keep.append(f)
-                elif CARDS[f["id"]].get("on") == "expire":
-                    expired.append(f)
-                else:
-                    self.say(cur, f"{CARDS[f['id']]['name']} 효과 종료")
-        P.field = keep
-        for f in expired:   # 시한 설치: 정해진 턴이 지나면 발동하고 사라짐
-            d = CARDS[f["id"]]
-            self.say(cur, f"{d['name']} 발동!")
-            self.run_fx(cur, d["fx"])
-            if self.over:
-                return
-        if P.shield > 0:           # 보호막은 내 다음 턴이 끝나면 사라져요
-            if P.shield_fresh:
-                P.shield_fresh = False
-            else:
-                P.shield = 0
-                self.say(cur, "보호막이 사라졌어요")
-        nxt = 1 - cur
-        if self.p[nxt].skip > 0:   # 시간 정지: 상대 턴을 건너뛰고 내가 다시 진행
-            self.p[nxt].skip -= 1
-            self.say(nxt, "멈춰 있어서 턴을 건너뛰어요")
-            self.turn = cur
-        else:
-            self.turn = nxt
-        self.start_turn()
-
-    # --- 플레이어 행동: (성공 여부, 메시지) ---
-    def play_card(self, pi, cid):
-        if self.pending:
-            return False, "공격이 진행 중이에요."
-        if self.over or self.turn != pi:
-            return False, "내 차례가 아니에요."
-        p = self.p[pi]
-        if cid not in p.hand:
-            return False, "손패에 없는 카드예요."
-        d = CARDS[cid]
-        if d["kind"] == "install":
-            if self.installed:
-                return False, "설치 카드는 한 턴에 1장만 쓸 수 있어요."
-            if len(p.field) >= CFG["field_max"]:
-                return False, f"설치 칸이 가득 찼어요 (최대 {CFG['field_max']})."
-            p.hand.remove(cid)
-            self.last = (pi, cid)
-            p.field.append({"id": cid, "left": d.get("duration") or None, "fresh": True, "hp": d.get("barrier")})
-            self.installed = True
-            self.say(pi, f"{d['name']} 설치")
-            if d.get("on") == "play" and len(p.field) >= d.get("need", 0):
-                self.run_fx(pi, d["fx"])
-        else:
-            p.hand.remove(cid)
-            self.last = (pi, cid)
-            self.say(pi, f"{d['name']} 사용")
-            eff = cid
-            if any(x["op"] == "mirror" for x in d["fx"]):       # 거울의 방: 상대의 마지막 '공격'을 복사
-                m = self.last_instant[1 - pi]
-                if m and "arena" in CARDS[m] and not any(x["op"] == "mirror" for x in CARDS[m]["fx"]):
-                    eff = m
-                    self.say(pi, f"거울! 상대의 {CARDS[m]['name']} 공격을 복사")
-            if "arena" in CARDS[eff]:
-                spec = self.make_spec(pi, eff)
-                if spec is None:
-                    self.say(pi, "설치 카드가 없어 불발!")
-                    self.run_fx(pi, CARDS[eff].get("fx", []), bonus=True, cid=eff)
-                else:
-                    self.pending = {"pi": pi, "cid": cid, "eff": eff, "spec": spec,
-                                    "seed": random.getrandbits(31), "mods": self.arena_mods(pi)}
-                    self.seq += 1
-                    return True, ""
-            else:
-                self.run_fx(pi, d["fx"], bonus=True, cid=cid)
-            self.last_instant[pi] = cid
-            if not self.over:
-                self.pass_turn()
-        self.seq += 1
-        return True, ""
-
-    # --- 아레나 공격 ---
-    def make_spec(self, pi, eff):
-        """카드의 arena 설정에 지금 상황(손패/설치/체력)을 반영한 실제 공격 설정"""
-        d = CARDS[eff]
-        s = dict(d["arena"])
-        P = self.p[pi]
-        copies = P.hand.count(eff)
-        if "ants_base" in s:
-            s["ants"] = s["ants_base"] + s.get("ants_per_copy", 0) * copies
-            s["max"] = s.get("max_base", 3) + s.get("max_per_copy", 0) * copies
-        if "n_rand" in s:
-            n = random.randint(*s["n_rand"])
-            s["n"] = n
-            s["max"] = n * s.get("per_hit", 1)
-        if "count_per_install" in s:
-            n = len(P.field)
-            if n == 0:
-                return None
-            s["count"] = n * s["count_per_install"]
-            s["max"] = s.get("max_per_install", 3) * n
-        b = s.get("hit_bonus_if")
-        if b:
-            hp = P.hp if b["who"] == "me" else self.p[1 - pi].hp
-            if (hp <= b["t"]) if b["cmp"] == "le" else (hp >= b["t"]):
-                s["per_hit"] += b["b"]
-                s["max"] += b["b"]
-        return s
-
-    def arena_mods(self, pi):
-        """설치된 필드 전용 카드들이 아레나에 주는 효과"""
-        A, D = self.p[pi], self.p[1 - pi]
-        cl = lambda v, hi: min(max(v, 0.0), hi)
-        return {"atk": cl(A.mod("atk"), 0.8), "dodge": cl(D.mod("dodge"), 1.0), "shrink": cl(D.mod("shrink"), 0.6),
-                "foe_slow": cl(A.mod("foeSlow"), 0.5), "proj_slow": cl(D.mod("projSlow"), 0.5)}
-
-    def resolve_attack(self, result):
-        """아레나 결과 {dmg, hits, safe}를 받아 피해/효과를 적용하고 턴을 넘겨요"""
-        pd, self.pending = self.pending, None
-        if not pd:
-            return False, "진행 중인 공격이 없어요."
-        pi, spec, eff = pd["pi"], pd["spec"], CARDS[pd["eff"]]
-        P = self.p[pi]
-        if spec["mode"] == "pick":
-            safe = bool(result.get("safe"))
-            self.say(1 - pi, "안전 상자!" if safe else "위험 상자!")
-            self.run_fx(pi, spec["safe"] if safe else spec["danger"], bonus=True)
-        else:
-            dmg = min(int(result.get("dmg", 0)), spec.get("max", 99))
-            hits = int(result.get("hits", 0))
-            if dmg > 0:
-                dmg += P.mod("dealBonus")
-                self.deal_damage(1 - pi, dmg)
-            elif not (result.get("self") or result.get("sheal") or result.get("fheal")):
-                self.say(1 - pi, "공격을 모두 피했어요!")
-            if result.get("fheal") and not self.over:           # 상대가 초록 구슬을 먹어 회복
-                self.say(1 - pi, "구슬을 먹었어요!")
-                self.heal(1 - pi, int(result["fheal"]))
-            if result.get("self") and not self.over:            # 반격/반동으로 내가 입는 피해
-                self.say(pi, "반격을 맞았어요!")
-                self.deal_damage(pi, int(result["self"]))
-            if result.get("sheal") and not self.over:           # 의식 성공: 내 회복
-                self.heal(pi, int(result["sheal"]))
-            if hits > 0 and not self.over:
-                self.run_fx(pi, eff.get("fx_hit", []))
-        if not self.over:
-            self.run_fx(pi, eff.get("fx", []), bonus=True, cid=pd["eff"])
-        self.last_instant[pi] = pd["cid"]
-        if not self.over:
-            self.pass_turn()
-        self.seq += 1
-        return True, ""
-
-    def auto_attack(self, att_skill=0.55, def_skill=0.55):
-        """사람이 조종하지 않고 AI끼리 아레나를 돌려 결과를 적용 (터미널/아레나를 못 쓰는 상대)"""
-        import arena
-        pd = self.pending
-        r = arena.auto_resolve(pd["spec"], pd["seed"], pd["mods"], att_skill, def_skill)
-        return self.resolve_attack(r)
-
-    def end_turn(self, pi):
-        if self.pending:
-            return False, "공격이 진행 중이에요."
-        if self.over or self.turn != pi:
-            return False, "내 차례가 아니에요."
-        if any(CARDS[c]["kind"] == "instant" for c in self.p[pi].hand):
-            return False, "손패에 즉발 카드가 있으면 턴을 넘길 수 없어요."
-        self.last = None
-        self.pass_turn()
-        self.seq += 1
-        return True, ""
-
-    def act(self, pi, a):
-        if a.get("a") == "play":
-            return self.play_card(pi, a.get("id"))
-        if a.get("a") == "end":
-            return self.end_turn(pi)
-        return False, "알 수 없는 행동이에요."
-
-    # --- pi 시점의 화면 데이터 (상대 손패/덱 내용은 숨김, JSON 직렬화 가능) ---
-    def view_for(self, pi):
-        me, op = self.p[pi], self.p[1 - pi]
-        fld = lambda p: [[f["id"], f["left"], f.get("hp")] for f in p.field]
-        if not self.over:
-            w = None
-        else:
-            w = -1 if self.winner == -1 else (1 if self.winner == pi else 0)
-        return {
-            "q": self.seq, "t": 1 if self.turn == pi else 0, "o": 1 if self.over else 0, "w": w,
-            "me": {"hp": me.hp, "hand": list(me.hand), "dn": len(me.deck), "f": fld(me),
-                   "in": 1 if (self.turn == pi and self.installed) else 0,
-                   "ps": me.poison, "sh": me.shield},
-            "op": {"hp": op.hp, "hn": len(op.hand), "dn": len(op.deck), "f": fld(op),
-                   "ps": op.poison, "sh": op.shield},
-            "pd": None if not self.pending else {
-                "a": 0 if self.pending["pi"] == pi else 1, "cid": self.pending["cid"], "eff": self.pending["eff"],
-                "spec": self.pending["spec"], "seed": self.pending["seed"], "mods": self.pending["mods"]},
-            "lp": None if not self.last else [0 if self.last[0] == pi else 1, self.last[1]],
-            "log": [[-1 if x is None else (0 if x == pi else 1), t] for x, t in self.log[-6:]],
-        }
-
-
-# ----------------------------------------------------------------------
-# AI
-# ----------------------------------------------------------------------
-def fx_value(fx, me, op, copies, bonus, mirror_fx=None):
-    sc = 0.0
-    room = CFG["max_hp"] - me.hp
-    reduce_ = op.mod("takeReduce")
-    for e in fx:
-        k, v = e["op"], e.get("v", 0)
-        dmg = kill = None
-        if k == "dmg":
-            dmg = kill = v
-        elif k == "dmgPerCopy":
-            dmg = kill = e.get("b", 0) + v * copies
-        elif k == "dmgPerInstall":
-            dmg = kill = v * len(me.field)
-        elif k == "dmgRand":
-            dmg, kill = (v + e["b"]) / 2, v
-        elif k == "dmgIf":
-            hp = me.hp if e["who"] == "me" else op.hp
-            dmg = kill = v + (e["b"] if (hp <= e["t"] if e["cmp"] == "le" else hp >= e["t"]) else 0)
-        if dmg is not None:
-            sc += (dmg + bonus) * 3
-            if kill + bonus >= op.hp + reduce_:
-                sc += 100
-        elif k in ("heal", "healPerCopy", "healPerInstall", "healRand"):
-            amt = {"heal": v, "healPerCopy": e.get("b", 0) + v * copies, "healPerInstall": v * len(me.field),
-                   "healRand": (v + e.get("b", v)) / 2}[k]
-            sc += min(amt, room) * (4 if me.hp <= 6 else 0.8)   # 체력이 위험할 때만 회복을 선호
-        elif k == "healMissing":
-            sc += min(max(v, (CFG["max_hp"] - me.hp + 1) // 2), room) * (4 if me.hp <= 6 else 0.8)
-        elif k == "chance":
-            p = e["p"] / 100
-            sc += (p * fx_value(e["win"], me, op, copies, bonus, mirror_fx)
-                   + (1 - p) * fx_value(e.get("lose", []), me, op, copies, bonus, mirror_fx))
-        elif k == "mirror":
-            sc += 0.9 * fx_value(mirror_fx, me, op, 0, bonus) if mirror_fx else 0
-        elif k == "foe":                     # 상대에게 일어나는 효과: 내게는 반대로 평가
-            sc -= fx_value(e["fx"], op, me, 0, 0)
-        elif k == "breakAll":
-            sc += 4 * len(op.field)
-        elif k == "discardCopies":
-            sc -= copies * 0.5
-        elif k == "draw":
-            sc += v * 1.5
-        elif k == "discard":
-            sc += min(len(op.hand), v) * 2
-        elif k == "discardSelf":
-            sc -= min(len(me.hand) - 1, v) * 2
-        elif k == "steal":
-            sc += min(len(op.hand), v) * 3
-        elif k == "breakInstall":
-            sc += 4 * v if op.field else 0
-        elif k == "poison":
-            sc += 2.5 * v if op.poison < v else 0
-        elif k == "shield":
-            sc += v * 1.5
-        elif k == "selfdmg":
-            sc -= v * 3 + (1000 if me.hp <= v else 0)
-        elif k == "swapHp":
-            sc += (op.hp - me.hp) * 3 - 3
-        elif k == "handSwap":
-            sc += (len(op.hand) - len(me.hand)) * 2 - 2
-        elif k == "timeStop":
-            sc += 7
-    return sc
-
-
-def card_value(d, me, op, copies, mcard=None):
-    """AI가 카드를 고를 때 쓰는 점수 (공격 카드는 시뮬레이션으로 구한 기대 피해 ev 사용)"""
-    bonus = me.mod("dealBonus")
-    sp = d.get("arena")
-    if any(x["op"] == "mirror" for x in d.get("fx", [])):
-        return 0.9 * card_value(mcard, me, op, copies) if mcard and "arena" in mcard else \
-            fx_value(d["fx"], me, op, copies, bonus, mcard["fx"] if mcard else None)
-    if sp:
-        if sp["mode"] == "pick":
-            p = sp["k"] / sp["n"]
-            sc = p * fx_value(sp["danger"], me, op, 0, bonus) + (1 - p) * fx_value(sp["safe"], me, op, 0, 0)
-        else:
-            ev = sp.get("ev", 1.0)
-            if "ants_base" in sp:
-                ev += sp.get("ev_per", 0) * copies
-            elif "count_per_install" in sp:
-                ev = sp.get("ev_per", 1.0) * len(me.field)
-            b = sp.get("hit_bonus_if")
-            if b:
-                hp = me.hp if b["who"] == "me" else op.hp
-                if (hp <= b["t"]) if b["cmp"] == "le" else (hp >= b["t"]):
-                    ev += sp.get("ev_bonus", 0)
-            sc = (ev + (bonus if ev > 0 else 0)) * 3
-            if ev >= op.hp:
-                sc += 20
-            sc += 0.6 * fx_value(d.get("fx_hit", []), me, op, copies, 0)
-        return sc + fx_value(d.get("fx", []), me, op, copies, bonus)
-    return fx_value(d["fx"], me, op, copies, bonus)
-
-
-def ai_score(d, me, op, mcard=None):
-    return card_value(d, me, op, me.hand.count(d["id"]) - 1, mcard) + random.random()
-
-
-def ai_choose(g, pi):
-    me, op = g.p[pi], g.p[1 - pi]
-    installs = [c for c in me.hand if CARDS[c]["kind"] == "install"]
-    if installs and not g.installed and len(me.field) < CFG["field_max"]:
-        return {"a": "play", "id": installs[0]}
-    instants = [c for c in me.hand if CARDS[c]["kind"] == "instant"]
-    if instants:
-        m = g.last_instant[1 - pi]
-        mcard = CARDS[m] if m and not any(x["op"] == "mirror" for x in CARDS[m]["fx"]) else None
-        best = max(instants, key=lambda c: ai_score(CARDS[c], me, op, mcard))
-        return {"a": "play", "id": best}
-    return {"a": "end"}
-
-
-def simple_choose(view):
-    """뷰 데이터만으로 고르는 간단한 자동 플레이 (테스트용 --auto)"""
-    hand = view["me"]["hand"]
-    if not view["me"].get("in") and len(view["me"]["f"]) < CFG["field_max"]:
-        for c in hand:
-            if CARDS[c]["kind"] == "install":
-                return {"a": "play", "id": c}
-    for c in hand:
-        if CARDS[c]["kind"] == "instant":
-            return {"a": "play", "id": c}
-    return {"a": "end"}
-
-
-# ----------------------------------------------------------------------
-# 터미널 화면
-# ----------------------------------------------------------------------
-AUTO = False
-
-
-def bar(hp):
-    n = max(0, min(hp, CFG["max_hp"]))
-    color = "31" if hp <= 5 else "32"
-    return paint("█" * n, color) + "░" * (CFG["max_hp"] - n)
-
-
-def field_text(f):
-    if not f:
-        return "없음"
-    out = []
-    for item in f:
-        cid, left = item[0], item[1]
-        hp = item[2] if len(item) > 2 else None
-        c = CARDS[cid]
-        extra = f" 방벽{hp}" if hp else ""
-        out.append(paint(f"{c['name']}" + (f"({left}턴{extra})" if left else f"(영구{extra})"), RCOLOR[c["rarity"]]))
-    return "  ".join(out)
-
-
-def status_text(side):
-    s = ""
-    if side.get("ps"):
-        s += f"  ☠중독 {side['ps']}"
-    if side.get("sh"):
-        s += f"  🛡보호막 {side['sh']}"
-    return s
-
-
-def render(v):
-    line = "═" * 60
-    print("\n" + line)
-    print(f"상대  체력 {max(v['op']['hp'], 0):>2}  {bar(v['op']['hp'])}   손패 {v['op']['hn']} · 덱 {v['op']['dn']}{status_text(v['op'])}")
-    print(f"  설치: {field_text(v['op']['f'])}")
-    print("─" * 60)
-    for who, text in v["log"][-5:]:
-        print(("  " if who < 0 else ("  나: " if who == 0 else "  상대: ")) + text)
-    print("─" * 60)
-    print(f"나    체력 {max(v['me']['hp'], 0):>2}  {bar(v['me']['hp'])}   덱 {v['me']['dn']}{status_text(v['me'])}")
-    print(f"  설치: {field_text(v['me']['f'])}")
-    print("  손패:")
-    if not v["me"]["hand"]:
-        print("    (비었어요)")
-    for i, cid in enumerate(v["me"]["hand"], 1):
-        print(f"   {i:>2}) {card_line(cid)}")
-    print(line)
-
-
-def settle(g, show=True):
-    """터미널은 아레나를 열 수 없어서, 공격이 시작되면 AI끼리 자동으로 판정해요 (온라인 상대가 아레나 미지원일 때도 동일)"""
-    while g.pending:
-        pd = g.pending
-        n0 = len(g.log)
-        g.auto_attack()
-        if show:
-            print(f"  ⚔ [{CARDS[pd['cid']]['name']}] 자동 판정")
-            for _, t in g.log[n0:]:
-                print(f"    {t}")
-
-
-def show_card_detail(cid):
-    """확대 보기(터미널): 카드 설명과 자세한 규칙"""
-    c = CARDS[cid]
-    print("\n" + paint(f"■ {c['name']}  [{RN[c['rarity']]}·{KN[c['kind']]}]", RCOLOR[c["rarity"]]))
-    print(f"  효과: {describe(c)}")
-    for n in card_notes(c):
-        print(f"   · {n}")
-    print()
-
-
-def ask_action(view):
-    """내 턴의 입력을 받아 행동(dict)을 돌려줍니다. 종료하려면 SystemExit."""
-    if AUTO:
-        return simple_choose(view)
-    hand = view["me"]["hand"]
-    has_instant = any(CARDS[c]["kind"] == "instant" for c in hand)
-    if view["me"].get("in"):
-        hint = "이번 턴 설치는 이미 했어요. 즉발 카드를 쓰거나 턴을 넘기세요."
-    elif has_instant:
-        hint = "설치 카드는 턴당 1장, 즉발 카드를 쓰면 턴이 끝나요."
-    else:
-        hint = "즉발 카드가 없어요. 설치를 마쳤다면 e 로 턴을 넘기세요."
-    print(f"내 차례 — {hint}")
-    while True:
-        s = input("번호=카드 사용 / ?번호=자세히 / e=턴 넘기기 / q=나가기 > ").strip().lower()
-        if s == "q":
-            raise SystemExit
-        if s == "e":
-            return {"a": "end"}
-        if s.startswith("?") and s[1:].isdigit() and 1 <= int(s[1:]) <= len(hand):
-            show_card_detail(hand[int(s[1:]) - 1])
-            continue
-        if s.isdigit() and 1 <= int(s) <= len(hand):
-            return {"a": "play", "id": hand[int(s) - 1]}
-        print("올바른 번호나 명령을 입력해 주세요.")
-
-
-def show_result(v):
-    word = {1: "승리! 🎉", 0: "패배…", -1: "무승부"}[v["w"]]
-    print("\n" + "★" * 60 + f"\n  게임 종료 — {word}\n" + "★" * 60)
-
-
-# ----------------------------------------------------------------------
-# AI 대전
-# ----------------------------------------------------------------------
-def play_ai(deck):
-    g = Game(deck, auto_deck())
-    seen = len(g.log)
-    while not g.over:
-        if g.turn == 0:
-            v = g.view_for(0)
-            render(v)
-            ok, msg = g.act(0, ask_action(v))
-            if not ok:
-                print("⚠", msg)
-            settle(g)
-            seen = len(g.log)
-        else:
-            time.sleep(0 if AUTO else 0.8)
-            g.act(1, ai_choose(g, 1))
-            if g.pending:
-                g.auto_attack()
-            for who, t in g.log[seen:]:
-                print(f"  {'상대' if who == 1 else '나'}: {t}")
-            seen = len(g.log)
-    render(g.view_for(0))
-    show_result(g.view_for(0))
-
-
-# ----------------------------------------------------------------------
-# 덱 구성 / 규칙 / 메뉴
-# ----------------------------------------------------------------------
-def deck_menu(deck):
-    while True:
-        n = rarity_counts(deck)
-        meters = "  ".join(f"{RN[r]} {n[r]}/{'∞' if LIMIT[r] >= 10 ** 9 else LIMIT[r]}" for r in RORDER)
-        print(f"\n덱 {len(deck)}장 (최소 {CFG['deck_min']} ~ 최대 {CFG['deck_max']}, 같은 카드 최대 {CFG['max_copies']})   {meters}")
-        for cid, c in CARDS.items():
-            cnt = deck.count(cid)
-            print(f"  {cid:<4} {card_line(cid)}   {paint(f'x{cnt}', '1') if cnt else ''}")
-        print("명령: +ID [장수]  -ID [장수]  ?ID(자세히)  auto(자동)  clear(비우기)  done(완료)")
-        s = input("덱 > ").strip().lower().split()
-        if not s:
-            continue
-        cmd = s[0]
-        if cmd == "done":
-            err = validate_deck(deck)
-            if err:
-                print("⚠", err, "(그래도 저장은 돼요. 대전 전에 고쳐 주세요)")
-            save_deck(deck)
-            return deck
-        if cmd == "auto":
-            deck = auto_deck()
-        elif cmd == "clear":
-            deck = []
-        elif cmd.startswith("?") and cmd[1:] in CARDS:
-            show_card_detail(cmd[1:])
-            continue
-        elif cmd[0] in "+-" and cmd[1:] in CARDS:
-            cid = cmd[1:]
-            times = int(s[1]) if len(s) > 1 and s[1].isdigit() else 1
-            for _ in range(times):
-                if cmd[0] == "+":
-                    if len(deck) >= CFG["deck_max"]:
-                        print("⚠ 덱이 가득 찼어요.")
-                        break
-                    if deck.count(cid) >= CFG["max_copies"]:
-                        print(f"⚠ 같은 카드는 최대 {CFG['max_copies']}장까지예요.")
-                        break
-                    r = CARDS[cid]["rarity"]
-                    if rarity_counts(deck)[r] >= LIMIT[r]:
-                        print(f"⚠ {RN[r]} 카드는 최대 {LIMIT[r]}장이에요.")
-                        break
-                    deck.append(cid)
-                elif cid in deck:
-                    deck.remove(cid)
-        else:
-            print("알 수 없는 명령이에요.")
-        save_deck(deck)
-
-
-def rules_text():
-    lim = CFG["rarity_limit"]
-    return (
-        f"■ 덱: {CFG['deck_min']}~{CFG['deck_max']}장. 일반 제한 없음 / 레어 {lim['rare']} / 영웅 {lim['hero']} / 레전드 {lim['legend']}장까지\n"
-        f"■ 같은 카드는 덱에 최대 {CFG['max_copies']}장까지\n"
-        f"■ 시작 체력 {CFG['start_hp']}, 손패 {CFG['start_hand']}장, 선공 무작위, 체력 0이면 패배\n"
-        f"■ 설치 카드: 턴을 쓰지 않지만 한 턴에 1장만 (설치 칸 최대 {CFG['field_max']})\n"
-        "■ 즉발 카드: 사용하면 턴이 끝나요. 손패에 즉발 카드가 있으면 턴을 넘길 수 없어요\n"
-        f"■ 매 턴 시작에 {CFG['draw_per_turn']}장 뽑기{' (선공 첫 턴 제외)' if CFG['first_player_skips_draw'] else ''}\n"
-        "■ 덱을 다 뽑았다면 내 덱 전체로 리필하고 " + f"{CFG['refill_draw']}장 뽑기\n"
-        f"■ 손패 최대 {CFG['hand_limit']}장 (넘치면 뽑은 카드는 사라져요)\n"
-        "■ 설치 중에는 'N턴 뒤 발동'(시한 만료)이나 '설치가 N장 이상일 때만 발동'하는 카드가 있어요\n"
-        "■ 공격 카드를 쓰면 검은 아레나가 열려요: 공격하는 쪽은 카드마다 다른 방식으로 조종하고(마우스),\n"
-        "  맞는 쪽은 WASD/방향키로 피해요. 맞은 만큼만 피해가 들어가요 (창 버전. 터미널은 자동 판정)\n"
-        "■ 공격 방식은 카드마다 달라요: 화살비·불비, 방패, 부채꼴, 레이저, 칼날 구체, 칼싸움(반격 피해!), 블랙홀, 차원문,\n"
-        "  심판 격자, 치유 의식, 초록 구슬(상대 회복), 조작 반전·얼음판·시야 제한 등\n"
-        "■ 상자 고르기 같은 확률 카드는 맞는 쪽이 직접 골라요: 안전하면 회복, 위험하면 피해\n"
-        "■ 방어 설치(방벽)는 받는 피해를 N까지 막고, 다 막거나 지속 턴이 지나면 사라져요 (방벽 → 보호막 → 체력 순서)\n"
-        "■ 필드 전용 카드는 아레나에서만 효과가 있어요 (피할 때 속도 증가 등)\n"
-        "■ 등급: 일반(피해 1~2, 단독 효과) / 레어(2~4, 쓸만한 특수) /\n"
-        "        영웅(3~5, 강하지만 리스크) / 레전드(각각 다른 독특한 효과, 판을 뒤집어요)")
-
-
-def show_rules():
-    print("\n" + rules_text())
-
-
-def need_valid(deck):
-    err = validate_deck(deck)
-    if err:
-        print("⚠", err, "→ 덱 구성에서 고쳐 주세요.")
-        return False
-    return True
-
-
-def menu():
-    deck = load_deck()
-    while True:
-        print("\n===== 한 장 승부 =====\n 1) AI 대전\n 2) 덱 구성\n 3) 규칙\n 0) 종료")
-        s = input("선택 > ").strip()
-        if s == "1" and need_valid(deck):
-            play_ai(deck)
-        elif s == "2":
-            deck = deck_menu(deck)
-        elif s == "3":
-            show_rules()
-        elif s == "0":
-            return
-
-
-def main(argv):
-    global COLOR, AUTO
-    if "--no-color" in argv or not sys.stdout.isatty():
-        COLOR = False
-    if "--auto" in argv:
-        AUTO = True
-    args = [a for a in argv if not a.startswith("--")]
-    if os.name == "nt":
-        os.system("")  # Windows 터미널에서 색상 활성화
-    try:
-        if not args:
-            menu()
-        elif args[0] == "ai":
-            deck = load_deck() if not AUTO else auto_deck()
-            if need_valid(deck):
-                play_ai(deck)
-        else:
-            print(__doc__)
-    except (KeyboardInterrupt, EOFError, SystemExit):
-        print("\n게임을 종료합니다.")
-
-
-if __name__ == "__main__":
-    main(sys.argv[1:])
