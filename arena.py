@@ -17,7 +17,7 @@ TAU = 2 * math.pi
 
 SHOOTLIKE = ("shoot", "shield", "gamble", "knock")      # 같은 '총알' 엔진을 쓰는 방식들
 MODES = SHOOTLIKE + ("swarm", "zone", "rain", "cone", "beam", "chase", "orbit", "duel", "vortex", "warp", "grid",
-                     "channel", "bounce", "pick")
+                     "channel", "bounce", "pick", "swarm2")
 
 # 방식별 안내: (제목, 공격자 설명, 피하는 쪽 설명). 카드의 "help": [제목, 공격자, 피하는쪽] 으로 덮어쓸 수 있어요.
 HELP = {
@@ -31,6 +31,9 @@ HELP = {
                "총알을 피하세요. 맞더라도 벽에 부딪히기 전에 방향을 틀어 버티세요."),
     "swarm":  ("떼 유인", "마우스 위치로 떼가 모여들어요. 상대 쪽으로 유인하세요.",
                "WASD/방향키로 이동해 몰려오는 떼에 닿지 않게 피하세요."),
+    "swarm2": ("숲의 분노 · 벌레 떼 습격",
+               "진짜 문지기가 벌레 떼를 풀었어요. 나와 상대 모두 같은 필드에서 동시에 피해요!",
+               "WASD/방향키로 이동해 벌레 떼를 피하세요. 벌레는 나와 상대를 번갈아 쫓아요 — 상대도 같은 필드에서 동시에 피하는 중이에요! 닿은 만큼 각자 피해를 입어요."),
     "zone":   ("범위 폭격", "마우스로 위험 구역을 옮기다가 클릭(또는 시간이 되면 자동)으로 확정해요. 잠시 뒤 폭발! 중앙일수록 큰 피해예요.",
                "WASD/방향키로 이동해 빨간 구역 밖으로 벗어나세요."),
     "rain":   ("하늘에서 쏟아짐", "마우스로 떨어뜨릴 지점을 정하고 클릭하면 위에서 한꺼번에 쏟아져요. 바닥의 표식이 착탄 지점이에요.",
@@ -43,8 +46,8 @@ HELP = {
                "WASD/방향키로 이동해 칼날에 닿지 않게 피하세요."),
     "orbit":  ("회전 칼날 구체", "마우스로 공을 움직여요. 공 둘레를 칼날이 360도 돌아요. 클릭하면 역회전하며 잠깐 빨라져요.",
                "WASD/방향키로 이동해 돌아가는 칼날과 공에 닿지 않게 피하세요."),
-    "duel":   ("칼싸움", "마우스로 이동하세요(칼은 자동으로 상대를 향해요). 클릭=베기! 상대가 먼저 베면 내가 큰 피해를 받아요.",
-               "WASD로 이동하고 클릭/스페이스로 베세요. 상대를 먼저 베면 반격 성공! 동시에 베면 서로 튕겨요."),
+    "duel":   ("칼싸움", "양쪽 조작이 똑같아요: WASD/방향키로 이동, 클릭 또는 스페이스로 베기(칼은 자동으로 상대를 향해요). 내가 먼저 베면 상대에게 큰 피해, 상대가 먼저 베면 내가 반격 피해! 동시에 베면 서로 튕겨요.",
+               "양쪽 조작이 똑같아요: WASD/방향키로 이동, 클릭 또는 스페이스로 베기(칼은 자동으로 상대를 향해요). 상대가 먼저 베면 내가 피해, 내가 먼저 베면 반격 성공! 동시에 베면 서로 튕겨요."),
     "vortex": ("블랙홀", "마우스로 블랙홀을 움직여요. 상대를 끌어당겨 중심에 가두세요.",
                "WASD/방향키로 블랙홀에서 멀어지세요. 가까울수록 끌려가는 힘이 세져요."),
     "warp":   ("차원문", "클릭한 곳에 차원문이 열려요. 상대가 들어가면 미리 보이는 출구로 순간이동하고, 거기서 폭발해요.",
@@ -61,10 +64,10 @@ HELP = {
 # 조작 안내: (공격자, 피하는 쪽)
 CTRL = {
     "shield": ("🖱 마우스: 조준 / 클릭: 발사", "⌨ WASD: 이동   🖱 마우스: 방패 방향"),
-    "duel": ("🖱 마우스: 이동 / 클릭: 베기", "⌨ WASD: 이동   🖱 클릭·스페이스: 베기"),
+    "duel": ("⌨ WASD / 방향키: 이동   🖱 클릭 · 스페이스: 베기",) * 2,
     "orbit": ("🖱 마우스: 공 이동 / 클릭: 역회전", None),
     "channel": ("🖱 마우스: 의식 원 이동 / 클릭: 순간이동", "⌨ WASD: 이동 (원 안에서 방해!)"),
-    "swarm": ("🖱 마우스: 유인 지점", None), "chase": ("🖱 마우스: 방향", None), "vortex": ("🖱 마우스: 블랙홀 이동", None),
+    "swarm": ("🖱 마우스: 유인 지점", None), "swarm2": (None, "⌨ WASD / 방향키: 이동 (상대도 같은 필드에서 같이 피해요)"), "chase": ("🖱 마우스: 방향", None), "vortex": ("🖱 마우스: 블랙홀 이동", None),
     "bounce": ("구경 중…", None), "pick": ("구경 중…", "🖱 클릭 또는 숫자키(1~)로 상자 고르기"),
 }
 TWIST_TXT = {"reverse": "🙃 조작 반전!", "rot": "🔄 조작이 90도 돌아갔어요!", "ice": "🧊 얼음판! 미끄러져요",
@@ -127,12 +130,14 @@ def ray_dist(px, py, ox, oy, ang):
 class Arena:
     """아레나 한 판의 상태. step(dt)로 시간을 진행하고 snapshot()으로 화면용 데이터를 얻어요."""
 
-    def __init__(self, spec, seed=0, mods=None):
+    def __init__(self, spec, seed=0, mods=None, mods2=None):
         self.spec = s = dict(spec)
         self.mode = s["mode"]
         self.impl, self.rng = "shoot" if self.mode in SHOOTLIKE else self.mode, random.Random(seed)
         m = {"dodge": 0.0, "shrink": 0.0, "atk": 0.0, "foe_slow": 0.0, "proj_slow": 0.0}
         m.update(mods or {})
+        self.mods2 = {"dodge": 0.0, "shrink": 0.0, "proj_slow": 0.0}      # swarm2 에서 두 번째로 피하는 쪽의 효과
+        self.mods2.update(mods2 or {})
         self.mods, self.t, self.time, self.done = m, 0.0, float(s.get("time", 9.0)), False
         self.dmg = self.hits = 0
         self.sdmg = self.sheal = self.fheal = 0          # 내가 입는 피해 / 내 회복 / 상대 회복
@@ -143,6 +148,7 @@ class Arena:
         self.dr = DEF_R * max(0.4, 1 - m["shrink"])
         self.dspeed = DEF_SPEED * (1 + m["dodge"]) * max(0.4, 1 - m["foe_slow"])
         self.in_x = self.in_y = 0
+        self.att_in = (0, 0)                              # 공격자의 이동 입력 (결투에서만 써요)
         self.dmx, self.dmy = SIZE / 2, SIZE / 3          # 피하는 쪽의 마우스 (방패 방향 등)
         self.dclicks = 0
         self.dstun, self.dslow = 0.0, 1.0
@@ -160,6 +166,13 @@ class Arena:
     # ── 입력 ──
     def set_def_input(self, ix, iy):
         self.in_x, self.in_y = int(clamp(ix, -1, 1)), int(clamp(iy, -1, 1))
+
+    def set_att_input(self, ix, iy):
+        self.att_in = (int(clamp(ix, -1, 1)), int(clamp(iy, -1, 1)))
+
+    def set_def2_input(self, ix, iy):
+        """(swarm2) 두 번째로 피하는 쪽의 이동 입력"""
+        self.in2 = (int(clamp(ix, -1, 1)), int(clamp(iy, -1, 1)))
 
     def set_def_aim(self, x, y):
         self.dmx, self.dmy = clamp(x, 0, SIZE), clamp(y, 0, SIZE)
@@ -354,6 +367,58 @@ class Arena:
                 self._hit(self.per_hit)
                 continue
             keep.append(a)
+        self.ants = keep
+        if self.ants_spawned >= self.ants_total and not self.ants:
+            self._finish()
+
+    # ── [CLAUDE-FIELD] swarm2: 두 명이 같은 필드에서 동시에 피하는 벌레 떼 (숲속 필드의 '숲의 분노') ──
+    # 첫 번째 피하는 쪽 = self.dx/dy (방장·AI 대전의 나), 두 번째 = self.d2x/d2y (상대).
+    # 벌레는 번갈아 한 명씩을 쫓고, 닿은 쪽만 피해를 입어요. 결과: dmg/hits (첫 번째), dmg2/hits2 (두 번째)
+    def _init_swarm2(self):
+        s, m2 = self.spec, self.mods2
+        self.per_hit, self.ants_total, self.ants_spawned = s.get("per_hit", 1), int(s.get("ants", 6)) * 2, 0
+        self.aspeed, self.ar, self.spawn_t, self.ants = s.get("speed", 100), s.get("r", 6), s.get("spawn_t", 1.8), []
+        self.dx, self.dy = SIZE * 0.3, SIZE * 0.72
+        self.d2x, self.d2y = SIZE * 0.7, SIZE * 0.72
+        self.d2r = DEF_R * max(0.4, 1 - m2.get("shrink", 0.0))
+        self.d2speed = DEF_SPEED * (1 + m2.get("dodge", 0.0))
+        self.pspeed2 = max(0.3, 1 - m2.get("proj_slow", 0.0))
+        self.in2, self.dmg2, self.hits2 = (0, 0), 0, 0
+
+    def _move_d2(self, dt):
+        ix, iy = self.in2
+        if ix and iy:
+            ix *= 0.7071
+            iy *= 0.7071
+        self.d2x = clamp(self.d2x + ix * self.d2speed * dt, self.d2r, SIZE - self.d2r)
+        self.d2y = clamp(self.d2y + iy * self.d2speed * dt, self.d2r, SIZE - self.d2r)
+
+    def _step_swarm2(self, dt):
+        self._move_d2(dt)
+        want = int(self.ants_total * min(1.0, self.t / self.spawn_t) + 0.999)
+        while self.ants_spawned < min(want, self.ants_total):
+            x, y = edge_point(self.rng)
+            self.ants.append([x, y, self.rng.uniform(0, 6.28), self.ants_spawned % 2])   # [x, y, 위상, 쫓는 대상(0/1)]
+            self.ants_spawned += 1
+        keep = []
+        for a in self.ants:
+            tx, ty = (self.dx, self.dy) if a[3] == 0 else (self.d2x, self.d2y)
+            dx, dy = tx - a[0], ty - a[1]
+            d = math.hypot(dx, dy) or 1.0
+            ang = math.atan2(dy, dx) + math.sin(self.t * 4 + a[2]) * 0.55
+            sp = self.aspeed * (self.pspeed if a[3] == 0 else self.pspeed2) * (0.55 if d < 22 else 1.0)
+            a[0] = clamp(a[0] + math.cos(ang) * sp * dt, 0, SIZE)
+            a[1] = clamp(a[1] + math.sin(ang) * sp * dt, 0, SIZE)
+            h0 = self._touch(a[0], a[1], self.ar)
+            h2 = (a[0] - self.d2x) ** 2 + (a[1] - self.d2y) ** 2 <= (self.ar + self.d2r) ** 2
+            if h0:
+                self._hit(self.per_hit)
+            if h2:
+                self.dmg2 += self.per_hit
+                self.hits2 += 1
+                self.events.append("hit2")
+            if not (h0 or h2):
+                keep.append(a)
         self.ants = keep
         if self.ants_spawned >= self.ants_total and not self.ants:
             self._finish()
@@ -599,7 +664,7 @@ class Arena:
         self.ax, self.ay, self.af = SIZE / 2, SIZE * 0.25, math.pi / 2
         self.df, self.reach, self.wind = -math.pi / 2, s.get("reach", 62), s.get("wind", 0.16)
         self.rec, self.stun_t, self.arc = s.get("rec", 0.95), s.get("stun", 1.0), s.get("arc", 0.95)
-        self.a_speed, self.per_hit = s.get("a_speed", 175) * self.pspeed, s.get("per_hit", 3)
+        self.a_speed, self.per_hit = s.get("a_speed", DEF_SPEED) * self.pspeed, s.get("per_hit", 3)
         self.back = s.get("back", 5)
         self.a_st, self.a_t, self.a_lock, self.a_stun = "idle", 0.0, 0.0, 0.0     # idle / wind / rec / stun
         self.d_st, self.d_t, self.d_lock, self.d_stun = "idle", 0.0, 0.0, 0.0
@@ -615,14 +680,11 @@ class Arena:
             self.af = math.atan2(self.dy - self.ay, self.dx - self.ax)
         if self.d_st != "wind":
             self.df = math.atan2(self.ay - self.dy, self.ax - self.dx)
-        # 공격자 이동
+        # 공격자 이동 (피하는 쪽과 똑같이 WASD, 베는 중엔 느려져요)
         if self.a_st != "stun":
-            dx, dy = self.mx - self.ax, self.my - self.ay
-            d = math.hypot(dx, dy)
-            sp = min(self.a_speed, d * 5) * (0.3 if self.a_st == "wind" else 1.0)
-            if d > 1e-6:
-                self.ax += dx / d * sp * dt
-                self.ay += dy / d * sp * dt
+            ix, iy = self.att_in
+            k = (0.7071 if ix and iy else 1.0) * self.a_speed * (0.3 if self.a_st == "wind" else 1.0)
+            self.ax, self.ay = self.ax + ix * k * dt, self.ay + iy * k * dt
         self.a_kv[0] *= math.exp(-5 * dt)
         self.a_kv[1] *= math.exp(-5 * dt)
         self.ax = clamp(self.ax + self.a_kv[0] * dt, 10, SIZE - 10)
@@ -901,6 +963,9 @@ class Arena:
         s = self.spec
         cap = s.get("max")
         r = {"dmg": int(min(self.dmg, cap) if cap is not None else self.dmg), "hits": int(self.hits), "safe": self.safe}
+        if self.mode == "swarm2":
+            r["dmg2"] = int(min(self.dmg2, cap) if cap is not None else self.dmg2)
+            r["hits2"] = int(self.hits2)
         if self.sdmg:
             r["self"] = int(min(self.sdmg, s.get("max_self", 99)))
         if self.sheal:
@@ -927,6 +992,10 @@ class Arena:
                            round(self.sh_hp / self.sh_max, 2)]
         elif m == "swarm":
             s.update(a=[[r1(a[0]), r1(a[1])] for a in self.ants], ar=self.ar,
+                     left=self.ants_total - self.ants_spawned + len(self.ants))
+        elif m == "swarm2":
+            s.update(a=[[r1(a[0]), r1(a[1]), a[3]] for a in self.ants], ar=self.ar, d2=[r1(self.d2x), r1(self.d2y)],
+                     dr2=r1(self.d2r), sp2=r1(self.d2speed), dmg2=self.dmg2,
                      left=self.ants_total - self.ants_spawned + len(self.ants))
         elif m == "zone":
             s.update(z=[[r1(z[0]), r1(z[1]), r1(z[2]), z[3], round(z[4], 2)] for z in self.zones],
@@ -1147,6 +1216,49 @@ class AIDefender:
         self._set(*bd)
 
 
+class AISwarmDodger:   # [CLAUDE-FIELD]
+    """swarm2 에서 피하는 한 명을 조종하는 AI. idx 0 = 첫 번째(방장/나), 1 = 두 번째(상대)"""
+
+    def __init__(self, arena, idx, skill=0.6, seed=1):
+        self.a, self.idx, self.skill, self.rng, self.cool = arena, idx, skill, random.Random(seed), 0.0
+        self.react, self.cur = 0.30 - 0.22 * skill, (0, 0)
+
+    def _set(self, wx, wy):
+        self.cur = (int(round(wx)), int(round(wy)))
+        (self.a.set_def_input if self.idx == 0 else self.a.set_def2_input)(*self.cur)
+
+    def update(self, dt):
+        a = self.a
+        self.cool -= dt
+        if self.cool > 0:
+            self._set(*self.cur)
+            return
+        self.cool = self.react
+        if self.rng.random() < (0.22 - 0.2 * self.skill):        # 가끔 실수
+            self._set(*self.rng.choice([(0, 0), (1, 0), (-1, 0), (0, 1), (0, -1)]))
+            return
+        x0, y0, sp = (a.dx, a.dy, a.dspeed) if self.idx == 0 else (a.d2x, a.d2y, a.d2speed)
+        tau = 0.28
+        preds = []                                                # 벌레가 잠깐 뒤에 있을 위치 (쫓는 대상 쪽으로 이동)
+        for t in a.ants:
+            tx, ty = (a.dx, a.dy) if t[3] == 0 else (a.d2x, a.d2y)
+            d = math.hypot(tx - t[0], ty - t[1]) or 1.0
+            step = a.aspeed * tau
+            preds.append((t[0] + (tx - t[0]) / d * step, t[1] + (ty - t[1]) / d * step, 1.3 if t[3] == self.idx else 0.6))
+        best, bd = 1e9, (0, 0)
+        for dx, dy in AIDefender.DIRS:
+            px, py = clamp(x0 + dx * sp * tau, 0, SIZE), clamp(y0 + dy * sp * tau, 0, SIZE)
+            sc = 0.05 if (dx or dy) else 0.0
+            for bx, by, w in preds:
+                sc += max(0.0, 1.0 - math.hypot(px - bx, py - by) / 60) * 0.8 * w
+            for edge in (px, SIZE - px, py, SIZE - py):           # 벽 근처 감점
+                if edge < 30:
+                    sc += (30 - edge) / 60
+            if sc < best:
+                best, bd = sc, (dx, dy)
+        self._set(*bd)
+
+
 class AIAttacker:
     """상대를 노리는 공격 AI. skill 0~1 (높을수록 정확하고 예측 사격을 해요)"""
 
@@ -1201,7 +1313,11 @@ class AIAttacker:
         elif m == "duel":
             dist = math.hypot(a.ax - a.dx, a.ay - a.dy) or 1.0
             ux, uy = (a.dx - a.ax) / dist, (a.dy - a.ay) / dist
-            a.set_aim(a.dx - ux * a.reach * 0.75, a.dy - uy * a.reach * 0.75)
+            wx, wy = a.dx - ux * a.reach * 0.75 - a.ax, a.dy - uy * a.reach * 0.75 - a.ay
+            if math.hypot(wx, wy) > 9:
+                a.set_att_input(*(int(round(v)) for v in max(AIDefender.DIRS[1:], key=lambda v: v[0] * wx + v[1] * wy)))
+            else:
+                a.set_att_input(0, 0)
             if a.a_st == "idle" and dist <= a.reach * 0.95 and a.d_st != "wind" and self.rng.random() < 0.25 + 0.4 * self.skill:
                 a.click()
             elif a.a_st == "idle" and dist <= a.reach * 0.95 and self.rng.random() < 0.08:
@@ -1222,9 +1338,18 @@ class AIAttacker:
                 a.click()
 
 
-def auto_resolve(spec, seed=0, mods=None, att_skill=0.55, def_skill=0.55):
+def auto_resolve(spec, seed=0, mods=None, att_skill=0.55, def_skill=0.55, mods2=None):
     """사람 없이 AI끼리 아레나를 끝까지 돌려 결과를 돌려줍니다 (터미널 버전/상대가 아레나를 못 쓸 때)"""
-    ar = Arena(spec, seed, mods)
+    ar = Arena(spec, seed, mods, mods2)
+    if ar.mode == "swarm2":                                    # 두 명이 같이 피해요
+        d0, d1 = AISwarmDodger(ar, 0, def_skill, seed + 2), AISwarmDodger(ar, 1, def_skill, seed + 3)
+        for _ in range(int((ar.time + 4) / DT)):
+            if ar.done:
+                break
+            d0.update(DT)
+            d1.update(DT)
+            ar.step(DT)
+        return ar.result()
     att = AIAttacker(ar, att_skill, seed + 1)
     dfn = AIDefender(ar, def_skill, seed + 2)
     for _ in range(int((ar.time + 4) / DT)):
